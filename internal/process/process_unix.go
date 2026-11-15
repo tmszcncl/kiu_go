@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,7 +41,10 @@ func Internal(args []string) (bool, int) {
 	}
 	switch args[1] {
 	case "supervise":
-		return true, supervise(args[2:], control)
+		if len(args) < 4 {
+			return true, 2
+		}
+		return true, supervise(args[3:], control, args[2])
 	case "worker":
 		return true, worker(args[2:], control)
 	default:
@@ -51,6 +55,10 @@ func Internal(args []string) (bool, int) {
 // Run starts a supervisor in a separate process group. The control pipe is also
 // a liveness channel: SIGKILL of the client closes it and triggers cancellation.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return RunNamed(args, stdin, stdout, stderr, "")
+}
+
+func RunNamed(args []string, stdin io.Reader, stdout, stderr io.Writer, name string) int {
 	executable, err := os.Executable()
 	if err != nil {
 		return failure(stderr, err)
@@ -64,7 +72,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)
-	cmd := exec.Command(executable, append([]string{internalMode, "supervise"}, args...)...)
+	cmd := exec.Command(executable, append([]string{internalMode, "supervise", name}, args...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	cmd.ExtraFiles = []*os.File{read}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -89,7 +97,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-func supervise(args []string, control *os.File) (code int) {
+func supervise(args []string, control *os.File, name string) (code int) {
 	// Diagnostics must not stop the background supervisor under stty tostop.
 	signal.Ignore(syscall.SIGTTOU)
 	reporter := statusReporter{name: displayExecutable(args[0])}
@@ -98,7 +106,6 @@ func supervise(args []string, control *os.File) (code int) {
 			reporter.output = os.Stderr
 		}
 	}
-	reporter.report("working", "Starting")
 	defer func() {
 		if code == 0 {
 			reporter.report("done", "Finished")
@@ -149,9 +156,57 @@ func supervise(args []string, control *os.File) (code int) {
 	if err != nil {
 		return failure(os.Stderr, err)
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return failure(os.Stderr, err)
+	}
+	registration, err := pool.Register(ctx, directory, name, args[0], cwd, os.Getppid())
+	if err != nil {
+		acquired <- struct{}{}
+		<-watcherDone
+		if ctx.Err() != nil {
+			return 128 + int(<-firstSignal)
+		}
+		return failure(os.Stderr, err)
+	}
+	defer func() {
+		if err := registration.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "kiu: clean task record:", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}()
+	reporter.name = pool.DisplayText(registration.Task.Name)
+	reporter.report("working", "Starting")
+	waited := false
 	lease, err := pool.AcquireLease(ctx, directory, func() {
-		fmt.Fprintln(os.Stderr, "kiu: waiting for a slot (capacity: 1)")
-		reporter.report("working", "Waiting for slot")
+		waited = true
+		fmt.Fprintf(os.Stderr, "kiu: waiting for a slot — %s\n", reporter.name)
+		snapshot, err := pool.ReadStatus(ctx, directory)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			fmt.Fprintln(os.Stderr, "kiu: slot details unavailable:", err)
+			reporter.report("working", "Waiting for slot")
+			return
+		}
+		message := "Waiting for slot"
+		if len(snapshot.Running) == 0 && snapshot.SlotOccupied {
+			fmt.Fprintln(os.Stderr, "kiu: slot occupied; job details unavailable (older Kiu or startup transition)")
+		}
+		for _, running := range snapshot.Running {
+			occupied := pool.DisplayText(running.Name)
+			if running.StartedAt != nil {
+				fmt.Fprintf(os.Stderr, "kiu: slot occupied by %s (running for %s)\n", occupied, elapsedSince(*running.StartedAt))
+			} else {
+				fmt.Fprintf(os.Stderr, "kiu: slot occupied by %s\n", occupied)
+			}
+			message += "; running: " + occupied
+		}
+		fmt.Fprintf(os.Stderr, "kiu: waiting jobs: %d (including this job)\n", snapshot.WaitingCount)
+		reporter.report("working", message)
 	})
 	acquired <- struct{}{}
 	<-watcherDone
@@ -184,9 +239,14 @@ func supervise(args []string, control *os.File) (code int) {
 	}
 	_ = gateRead.Close()
 	pgid := cmd.Process.Pid
-	if err := lease.Reserve(pgid); err != nil {
+	if err := lease.ReserveTask(pgid, registration); err != nil {
 		_ = gateWrite.Close() // EOF: worker exits without executing the command.
 		_ = cmd.Wait()
+		// No commit byte was sent, so this worker could not execute user code
+		// or start descendants. Remove any partially published reservation.
+		if cleanupErr := lease.Clear(); cleanupErr != nil {
+			fmt.Fprintln(os.Stderr, "kiu: clean failed reservation:", cleanupErr)
+		}
 		return failure(os.Stderr, err)
 	}
 	// The durable reservation is visible before any user code can execute.
@@ -203,6 +263,11 @@ func supervise(args []string, control *os.File) (code int) {
 	if _, err := gateWrite.Write([]byte{1}); err != nil {
 		_ = gateWrite.Close()
 		waitErr := cmd.Wait()
+		if alive, checkErr := pool.GroupAlive(pgid); checkErr == nil && !alive {
+			if cleanupErr := lease.Clear(); cleanupErr != nil {
+				fmt.Fprintln(os.Stderr, "kiu: clean failed gate reservation:", cleanupErr)
+			}
+		}
 		fmt.Fprintln(os.Stderr, "kiu: commit worker startup:", err)
 		if waitErr != nil {
 			return exitCode(waitErr)
@@ -210,6 +275,9 @@ func supervise(args []string, control *os.File) (code int) {
 		return 1
 	}
 	_ = gateWrite.Close()
+	if waited {
+		fmt.Fprintf(os.Stderr, "kiu: starting — %s (waited %s)\n", reporter.name, elapsedSince(registration.Task.SubmittedAt))
+	}
 	reporter.report("working", "Running")
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -295,7 +363,16 @@ func worker(args []string, gate *os.File) int {
 	signal.Ignore(syscall.SIGTTIN, syscall.SIGTTOU)
 	executable, err := exec.LookPath(args[0])
 	if err == nil {
-		err = syscall.Exec(executable, args, append(os.Environ(), "KIU_EXECUTION_CONTEXT=1"))
+		// syscall.Exec does not deduplicate environment keys like exec.Cmd does.
+		// An inherited empty marker must not shadow the marker we add here.
+		environment := os.Environ()
+		filtered := environment[:0]
+		for _, value := range environment {
+			if !strings.HasPrefix(value, "KIU_EXECUTION_CONTEXT=") {
+				filtered = append(filtered, value)
+			}
+		}
+		err = syscall.Exec(executable, args, append(filtered, "KIU_EXECUTION_CONTEXT=1"))
 	}
 	fmt.Fprintf(os.Stderr, "kiu: cannot start %q: %v\n", args[0], err)
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
@@ -319,3 +396,11 @@ func exitCode(err error) int {
 }
 
 func failure(stderr io.Writer, err error) int { fmt.Fprintln(stderr, "kiu:", err); return 1 }
+
+func elapsedSince(start time.Time) time.Duration {
+	elapsed := time.Since(start)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed.Truncate(time.Second)
+}

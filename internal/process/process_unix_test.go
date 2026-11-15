@@ -3,17 +3,22 @@
 package process
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/tmszcncl/kiu_go/internal/pool"
 )
 
 type identity struct{ PID, Supervisor, Group int }
@@ -23,7 +28,7 @@ func TestMain(m *testing.M) {
 		os.Exit(code)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "__test_client" {
-		os.Exit(Run(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+		os.Exit(RunNamed(os.Args[2:], os.Stdin, os.Stdout, os.Stderr, os.Getenv("KIU_TEST_LABEL")))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "__test_job" {
 		os.Exit(testJob(os.Args[2:]))
@@ -68,7 +73,7 @@ type invocation struct {
 	ready, release, log string
 }
 
-func startInvocation(t *testing.T, home, mode string) *invocation {
+func startInvocation(t *testing.T, home, mode string, label ...string) *invocation {
 	t.Helper()
 	dir := t.TempDir()
 	i := &invocation{ready: filepath.Join(dir, "ready"), release: filepath.Join(dir, "release"), log: filepath.Join(dir, "log"), done: make(chan error, 1)}
@@ -82,7 +87,11 @@ func startInvocation(t *testing.T, home, mode string) *invocation {
 	}
 	i.cmd = exec.Command(exe, "__test_client", exe, "__test_job", mode, i.ready, i.release)
 	i.cmd.Dir = t.TempDir() // Independent directories must still share capacity.
-	i.cmd.Env = append(os.Environ(), "HOME="+home, "XDG_STATE_HOME="+home, "KIU_EXECUTION_CONTEXT=")
+	name := ""
+	if len(label) != 0 {
+		name = label[0]
+	}
+	i.cmd.Env = append(os.Environ(), "HOME="+home, "XDG_STATE_HOME="+home, "KIU_EXECUTION_CONTEXT=", "KIU_HERDR_STATUS=", "KIU_TEST_LABEL="+name, "KIU_PRIVATE_CANARY=environment-secret-must-not-persist")
 	i.cmd.Stdout, i.cmd.Stderr = log, log
 	if err := i.cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -305,4 +314,133 @@ func TestDirectChildCrashGivesDescendantsGrace(t *testing.T) {
 	releaseJob(t, first)
 	waitExit(t, first, 137)
 	waitExit(t, second, 0)
+}
+
+func snapshot(t *testing.T, home string) pool.Snapshot {
+	t.Helper()
+	directory := filepath.Join(home, "kiu")
+	if runtime.GOOS == "darwin" {
+		directory = filepath.Join(home, "Library", "Application Support", "kiu", "state")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	result, err := pool.ReadStatus(ctx, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestNamedQueueSnapshotsCancellationCrashAndPrivacy(t *testing.T) {
+	home := t.TempDir()
+	first := startInvocation(t, home, "hold", "Tidudanka — full CI")
+	id := waitReady(t, first.ready)
+	second := startInvocation(t, home, "hold", "Calculyo — system tests")
+	assertWaiting(t, second)
+	third := startInvocation(t, home, "hold", "Flutter — build")
+	assertWaiting(t, third)
+	status := snapshot(t, home)
+	if status.RunningCount != 1 || status.WaitingCount != 2 || status.Running[0].Name != "Tidudanka — full CI" {
+		t.Fatalf("unexpected snapshot: %+v", status)
+	}
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for range 5 {
+				directory := filepath.Join(home, "kiu")
+				if runtime.GOOS == "darwin" {
+					directory = filepath.Join(home, "Library", "Application Support", "kiu", "state")
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				got, err := pool.ReadStatus(ctx, directory)
+				cancel()
+				if err != nil {
+					t.Errorf("concurrent snapshot: %v", err)
+					return
+				}
+				if got.RunningCount != 1 || got.WaitingCount != 2 {
+					t.Errorf("inconsistent concurrent snapshot: %+v", got)
+				}
+			}
+		}()
+	}
+	readers.Wait()
+	data, err := os.ReadFile(second.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Calculyo — system tests") || !strings.Contains(string(data), "slot occupied by Tidudanka — full CI") || !strings.Contains(string(data), "waiting jobs:") {
+		t.Fatalf("missing queue explanation: %s", data)
+	}
+	directory := filepath.Join(home, "kiu")
+	if runtime.GOOS == "darwin" {
+		directory = filepath.Join(home, "Library", "Application Support", "kiu", "state")
+	}
+	if err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), first.ready) || strings.Contains(string(data), "environment-secret-must-not-persist") {
+			t.Fatalf("private args/environment persisted in %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitExit(t, second, 143)
+	if got := snapshot(t, home); got.WaitingCount != 1 {
+		t.Fatalf("cancelled waiter remains: %+v", got)
+	}
+	if err := syscall.Kill(id.Supervisor, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitExit(t, first, 137)
+	if got := snapshot(t, home); got.RunningCount != 1 || got.Running[0].Name != "Tidudanka — full CI" || got.WaitingCount != 1 {
+		t.Fatalf("lost crash reservation metadata: %+v", got)
+	}
+	releaseJob(t, first)
+	waitReady(t, third.ready)
+	data, err = os.ReadFile(third.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "kiu: starting — Flutter — build (waited ") {
+		t.Fatalf("missing resumed message: %s", data)
+	}
+	releaseJob(t, third)
+	waitExit(t, third, 0)
+	if got := snapshot(t, home); got.RunningCount != 0 || got.WaitingCount != 0 {
+		t.Fatalf("completed tasks remain: %+v", got)
+	}
+	entries, err := os.ReadDir(filepath.Join(directory, "tasks"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("completed metadata/locks accumulated: %v", entries)
+	}
+}
+
+func TestFreeInvocationIsQuiet(t *testing.T) {
+	i := startInvocation(t, t.TempDir(), "finish", "quiet job")
+	waitExit(t, i, 0)
+	data, err := os.ReadFile(i.log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("unexpected free-slot banner: %q", data)
+	}
 }

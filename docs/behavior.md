@@ -1,7 +1,8 @@
 # Execution and failure behavior
 
-Kiu currently supplies one shared slot without configuration. `status`, configurable
-capacity, labels, wait timeouts and no-wait mode are not implemented yet.
+Kiu currently supplies one shared slot without configuration, optional `--name`
+labels and human/JSON status. Configurable capacity, wait timeouts and no-wait mode
+are not implemented yet.
 
 ## Supported commands
 
@@ -98,3 +99,62 @@ descendants, corrupt reservations and unsafe state-file permissions.
 Local validation: macOS arm64; Linux arm64 in a Docker VM using a container with
 `--init`. The race detector complements these interprocess tests. CI, native amd64,
 real Rails/Docker CI and Flutter acceptance are still pending.
+
+## Status JSON schema, version 1
+
+`kiu status --json` writes one JSON object to stdout; diagnostics remain on stderr.
+It does not consume an execution slot and is allowed inside a wrapped command.
+Top-level fields:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Integer `1`. |
+| `host` | Local hostname. |
+| `capacity` | Integer `1` in this version. |
+| `slot_occupied` | A live group reservation or an owned slot lock was observed. |
+| `running_count`, `waiting_count` | Lengths of the corresponding arrays. |
+| `running`, `waiting` | Task arrays; empty arrays are `[]`, never `null`. |
+
+A known task has `details_available: true`, `schema_version`, a full random `id`, `state` (`running` or `waiting`),
+`name`, `executable` (basename only), `cwd`, `client_pid`, `supervisor_pid` and
+`submitted_at` (UTC RFC3339 timestamp). Running tasks also have `child_pid`,
+`pgid` and `started_at`. IDs are not PIDs; the text view abbreviates IDs for display.
+Labels are printable UTF-8, up to 512 bytes. The default label is the project
+working directory basename plus executable basename. Full argv and environment
+are excluded. A user-provided label or directory can still reveal private data.
+Terminal rendering strips non-printable/format characters from paths and hostnames.
+Invalid UTF-8 in filesystem names is replaced for JSON/display only; child execution
+retains its actual working directory.
+
+For a live reservation created by an older binary, `details_available` is false:
+`id`, `executable` and `cwd` are empty, PID fields/timestamps may be zero and
+`started_at` is absent. The display name explicitly says details are unavailable.
+During startup, `slot_occupied` may be true before any command has started; the
+registered job remains waiting until its process group is reserved. Do not infer
+an execution start or manufacture another running task from that field alone.
+
+The snapshot is coordinated against registration, reservation publication and
+normal cleanup. Processes can die immediately afterward. Lists are ordered by
+submission time for display only, without FIFO or priority guarantees. A waiter's
+initial stderr/Herdr explanation is one snapshot and is not continuously redrawn;
+use status again when fresh details matter. The waiting count includes that waiter.
+Status has a bounded five-second coordination-lock wait; failure returns status 1.
+Older binaries do not register waiting tasks, so waiting counts only include
+invocations implementing this metadata protocol. Upgrade participating binaries
+for a complete view.
+Older binaries also do not take the metadata coordination lock, so mixed-version
+snapshots have weaker transition consistency. The execution slot remains guarded;
+upgrade the participating binaries before relying on full queue visibility.
+
+Waiting registrations are live only while their supervisor holds a per-task file
+lock. Missing supervisor PIDs or PID reuse do not determine liveness. New job
+registration and status queries prune abandoned records under `state.lock`.
+Foreign filenames in the task directory are ignored. Malformed recognized live
+records return an error rather than fabricated details. Abandoned private atomic
+write temporaries are pruned under coordination as well.
+Running metadata survives supervisor death inside the active reservation and is
+reported while the managed group still exists. No completed-job history is kept.
+
+Same-boot PGID reuse after a supervisor crash can conservatively show the old
+job name for an unrelated group, just as it can conservatively delay admission.
+Status is not proof that a recorded PID/PGID still identifies the original process.

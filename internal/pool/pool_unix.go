@@ -5,10 +5,8 @@ package pool
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -50,6 +48,7 @@ type reservation struct {
 	SchemaVersion int    `json:"schema_version"`
 	PGID          int    `json:"pgid"`
 	BootID        string `json:"boot_id"`
+	Task          *Task  `json:"task,omitempty"`
 }
 
 func (l *Lease) Close() { _ = l.file.Close() }
@@ -57,7 +56,14 @@ func (l *Lease) Close() { _ = l.file.Close() }
 // Clear is only safe after the managed process group has ceased to exist.
 // The caller still owns the lock, so no admission can race with this removal.
 func (l *Lease) Clear() error {
-	err := os.Remove(filepath.Join(l.directory, "active.json"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lock, err := lockState(ctx, l.directory)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	err = os.Remove(filepath.Join(l.directory, "active.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -65,60 +71,77 @@ func (l *Lease) Clear() error {
 }
 
 // Reserve must complete before the gated worker is allowed to execute user code.
-func (l *Lease) Reserve(pgid int) error {
+func (l *Lease) Reserve(pgid int) error { return l.reserve(pgid, nil) }
+
+func (l *Lease) ReserveTask(pgid int, registration *Registration) error {
+	return l.reserve(pgid, registration)
+}
+
+func (l *Lease) reserve(pgid int, registration *Registration) error {
 	if pgid <= 1 {
 		return errors.New("invalid process group")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lock, err := lockState(ctx, l.directory)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	boot, err := bootID()
 	if err != nil {
 		return fmt.Errorf("read boot identity: %w", err)
 	}
-	if boot == "" {
-		return errors.New("empty boot identity")
+	record := reservation{SchemaVersion: 1, PGID: pgid, BootID: boot}
+	if registration != nil {
+		task := registration.Task
+		now := time.Now().UTC()
+		task.State, task.PGID, task.ChildPID, task.StartedAt = "running", pgid, pgid, &now
+		record.Task = &task
 	}
-	data, err := json.Marshal(reservation{SchemaVersion: 1, PGID: pgid, BootID: boot})
-	if err != nil {
+	if err := validateReservation(record); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(l.directory, ".reservation-*")
-	if err != nil {
+	// The reservation is committed first. If updating the display record fails,
+	// the gated worker still cannot start, and capacity remains fail-closed.
+	if err := atomicJSON(l.directory, filepath.Join(l.directory, "active.json"), record); err != nil {
 		return err
 	}
-	defer os.Remove(temporary.Name())
-	defer temporary.Close()
-	if _, err := temporary.Write(data); err != nil {
-		return err
+	if registration != nil {
+		if err := atomicJSON(filepath.Join(l.directory, "tasks"), filepath.Join(l.directory, "tasks", registration.Task.ID+".json"), record.Task); err != nil {
+			return err
+		}
+		registration.Task = *record.Task
 	}
-	if err := temporary.Sync(); err != nil {
-		return err
+	return nil
+}
+
+func validateReservation(record reservation) error {
+	if record.SchemaVersion != 1 || record.PGID <= 1 || record.BootID == "" {
+		return errors.New("invalid active reservation; refusing unsafe admission")
 	}
-	// Directory fsync is unnecessary for the process-lifetime contract: a host
-	// power loss also stops the managed processes. This is not a persistent queue.
-	return os.Rename(temporary.Name(), filepath.Join(l.directory, "active.json"))
+	if record.Task != nil {
+		if err := validateTask(*record.Task); err != nil {
+			return err
+		}
+		if record.Task.State != "running" || record.Task.PGID != record.PGID {
+			return errors.New("inconsistent active task")
+		}
+	}
+	return nil
 }
 
 func reservationAlive(directory string) (bool, error) {
-	file, err := openPrivateFile(filepath.Join(directory, "active.json"), syscall.O_RDONLY)
+	var record reservation
+	err := readJSON(filepath.Join(directory, "active.json"), &record)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return true, err
 	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 4097))
-	if err != nil {
+	if err := validateReservation(record); err != nil {
 		return true, err
-	}
-	if len(data) > 4096 {
-		return true, errors.New("active reservation exceeds 4096 bytes")
-	}
-	var record reservation
-	if err := json.Unmarshal(data, &record); err != nil {
-		return true, err
-	}
-	if record.SchemaVersion != 1 || record.PGID <= 1 || record.BootID == "" {
-		return true, errors.New("invalid active reservation; refusing unsafe admission")
 	}
 	boot, err := bootID()
 	if err != nil {
@@ -138,18 +161,8 @@ func reservationAlive(directory string) (bool, error) {
 }
 
 func AcquireLease(ctx context.Context, directory string, waiting func()) (*Lease, error) {
-	if err := os.MkdirAll(directory, 0700); err != nil {
+	if err := prepareDirectory(directory); err != nil {
 		return nil, err
-	}
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return nil, fmt.Errorf("state directory %s must be a private directory (mode 0700)", directory)
-	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != os.Geteuid() {
-		return nil, fmt.Errorf("state directory %s must belong to the current user", directory)
 	}
 	file, err := openPrivateFile(filepath.Join(directory, "slot.lock"), syscall.O_CREAT|syscall.O_RDWR)
 	if err != nil {
@@ -164,7 +177,13 @@ func AcquireLease(ctx context.Context, directory string, waiting func()) (*Lease
 		}
 		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
+			stateLock, checkErr := lockState(ctx, directory)
+			if checkErr != nil {
+				file.Close()
+				return nil, checkErr
+			}
 			alive, checkErr := reservationAlive(directory)
+			stateLock.Close()
 			if checkErr != nil {
 				file.Close()
 				return nil, fmt.Errorf("check %s: %w", filepath.Join(directory, "active.json"), checkErr)
@@ -213,4 +232,22 @@ func openPrivateFile(path string, flags int) (*os.File, error) {
 		return nil, fmt.Errorf("%s must be a private regular file owned by the current user (mode 0600)", path)
 	}
 	return file, nil
+}
+
+func prepareDirectory(directory string) error {
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("state directory %s must be a private directory (mode 0700)", directory)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != os.Geteuid() {
+		return fmt.Errorf("state directory %s must belong to the current user", directory)
+	}
+
+	return nil
 }

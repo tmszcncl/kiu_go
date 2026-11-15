@@ -12,7 +12,8 @@ This is an early development version. It runs commands and preserves argument
 boundaries, working directory, environment, standard streams and normal exit codes.
 On macOS and Linux, one shared slot admits one command at a time across
 directories. Other invocations wait automatically. Waiting can be cancelled.
-Nested invocations are rejected to avoid deadlock.
+Nested invocations are rejected to avoid deadlock. Optional job names and
+`kiu status` / `kiu status --json` describe running and waiting jobs.
 
 A short-lived supervisor forwards cancellation to the job's Unix process group.
 It allows five seconds for cleanup, then sends SIGKILL. A second cancellation
@@ -81,7 +82,54 @@ For Kiu's own test harness, use the unwrapped commands in [Development](#develop
 Arguments after the executable belong to the child. Kiu does not interpret shell
 syntax; invoke a shell explicitly when needed. `run`, `config`, `status`, and
 `version` are reserved names. Use `kiu run -- status` to execute a program named
-`status`. Configuration and status commands are not implemented yet.
+`status`. Configuration commands are not implemented yet.
+
+### Job names and queue status
+
+Both forms accept a Kiu label before the child command:
+
+```sh
+kiu --name "Calculyo — system tests" docker compose exec -T app bin/rails test:system
+kiu --name "Calculyo — system tests" run -- docker compose exec -T app bin/rails test:system
+```
+
+Without a label, the display name is the working directory's basename plus the
+executable's basename, for example `calculyo_rails — docker`. Labels must contain
+printable text, at most 512 UTF-8 bytes. Arguments after the child executable are
+never parsed as Kiu flags: `kiu rails test --name example` passes `--name example`
+to Rails. Do not include secrets in labels: names and working directories appear
+in private local metadata and status output.
+
+Outside opt-in Herdr reporting, a free slot starts the command without a Kiu banner. An invocation that has to
+wait prints one snapshot to stderr:
+
+```text
+kiu: waiting for a slot — Calculyo — system tests
+kiu: slot occupied by Tidudanka — full CI (running for 4m12s)
+kiu: waiting jobs: 3 (including this job)
+```
+
+When admitted, it prints:
+
+```text
+kiu: starting — Calculyo — system tests (waited 1m8s)
+```
+
+The initial wait message is a snapshot, not a continuously refreshed queue view.
+To inspect the current state without acquiring a job slot:
+
+```sh
+kiu status
+kiu status --json
+```
+
+Status shows names, directories, IDs, submission/start times and process IDs.
+The human-readable view includes elapsed running/waiting durations; the JSON
+schema is documented in [behavior](docs/behavior.md#status-json-schema-version-1).
+The waiting count includes the invocation printing that wait message. Submission-time display
+order does not promise FIFO, a queue position or an estimated start time.
+An older binary or a brief admission transition may occupy the slot without
+usable job details; Kiu reports that rather than inventing a name or start time.
 
 Exit codes: child status on normal completion; 2 for CLI usage errors or nested
 execution; 126 when an executable cannot start; 127 when it is missing. On macOS and Linux, a child killed
@@ -103,6 +151,9 @@ updated project instructions.
 - Prefix each test run, CI script, build, mutation test and large import with `kiu`.
   This includes a single test file or test example. Follow the project's existing
   command, working directory, environment and arguments; add the prefix once.
+- Give logical jobs a descriptive label, for example
+  `kiu --name "project — system tests" <existing-command>`. The label goes before
+  the command or `run --`, never after child arguments.
 - Allow queued commands to wait. Do not launch duplicates or bypass Kiu because
   a command is waiting. Do not delete lock files or reservations to unblock it.
   Use a sufficiently long tool timeout, or your agent's background execution and
@@ -121,8 +172,10 @@ updated project instructions.
   do not assume a cancelled Docker client means container work has stopped.
   Check the specific job/container before retrying. Stop only verified leftover
   work belonging to that job, following the project's cleanup instructions.
-- Kiu currently has one shared slot. `kiu status`, configuration, labels,
-  `--no-wait` and `--wait-timeout` are not implemented; do not invent these options.
+- Use `kiu status --json` for current running/waiting jobs. Treat it as a
+  snapshot; do not invent queue positions, ETAs or missing job details.
+  Kiu currently has one shared slot. Configuration, `--no-wait` and
+  `--wait-timeout` are not implemented; do not invent these options.
 ```
 
 This is an advisory project policy, not automatic enforcement. It intentionally
@@ -226,6 +279,150 @@ for target-specific setup; web tests may need a different runner.
 | Named test | `kiu go test ./internal/example -run '^TestExample$'` |
 | Build all packages | `kiu go build ./...` |
 
+### Python and Django
+
+Use the project's virtual environment and dependencies; replace `python` with its
+actual interpreter if needed. Django also needs its test settings and database
+permissions configured.
+
+| Task | Example command | Official reference |
+| --- | --- | --- |
+| pytest suite | `kiu python -m pytest` | [pytest CLI](https://docs.pytest.org/en/stable/how-to/usage.html) |
+| One pytest file | `kiu python -m pytest tests/test_example.py` | [pytest selection](https://docs.pytest.org/en/stable/how-to/usage.html) |
+| Standard-library unittest discovery | `kiu python -m unittest discover` | [unittest discovery](https://docs.python.org/3/library/unittest.html#test-discovery) |
+| Django suite, without input prompts | `kiu python manage.py test --noinput` | [Django testing](https://docs.djangoproject.com/en/stable/topics/testing/overview/) |
+
+### Node.js and TypeScript
+
+Install the project's dependencies first. Use existing scripts from `package.json`;
+`test:ci` and `build` below are example script names, not built-in npm tasks.
+They must finish without watch mode. Preserve the project's TypeScript compilation
+or loader setup rather than assuming every runner accepts TypeScript directly.
+
+| Task | Example command | Official reference |
+| --- | --- | --- |
+| Node's built-in test runner | `kiu node --test` | [Node CLI](https://nodejs.org/api/cli.html#--test) |
+| Existing finite test script | `kiu npm run test:ci` | [npm scripts](https://docs.npmjs.com/cli/v11/commands/npm-run/) |
+| Existing production build script | `kiu npm run build` | [npm scripts](https://docs.npmjs.com/cli/v11/commands/npm-run/) |
+| Installed Vitest, single run | `kiu ./node_modules/.bin/vitest run` | [Vitest CLI](https://vitest.dev/guide/cli.html) |
+| Installed Playwright, no automatic HTML report server | `PLAYWRIGHT_HTML_OPEN=never kiu ./node_modules/.bin/playwright test` | [Playwright CLI](https://playwright.dev/docs/test-cli), [HTML reporter](https://playwright.dev/docs/test-reporters#html-reporter) |
+
+The local executable paths require a `node_modules` installation containing those
+tools; with another dependency layout, use the project's existing package-manager
+script. Playwright needs its browsers and application/test configuration installed.
+The environment assignment above is shell syntax placed **before Kiu**.
+Do not add a universal `--watch=false`: runner options differ. Leave dev servers,
+watchers and interactive test/report UIs outside the queue.
+
+### .NET (C# and F#)
+
+Use the SDK selected by the project (including `global.json`, when present),
+restored dependencies and a project compatible with the macOS/Linux host. These
+examples do not establish Windows, .NET Framework, WPF or WinForms support.
+Replace the illustrative solution/project paths with actual files.
+
+| Task | Example command | Official reference |
+| --- | --- | --- |
+| Test project | `kiu dotnet test tests/App.Tests/App.Tests.csproj` | [dotnet test](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-test) |
+| Release build | `kiu dotnet build App.sln -c Release` | [dotnet build](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-build) |
+| Publish local deployment artifacts | `kiu dotnet publish src/App/App.csproj -c Release` | [dotnet publish](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-publish) |
+
+Use the project's test runner options; VSTest and Microsoft.Testing.Platform do
+not accept identical flags. Publishing artifacts here does not deploy a service.
+
+### Game engines and rendering
+
+These are **project-specific templates**, with CLI syntax checked against the
+linked official documentation. They have **not been acceptance-tested through
+Kiu**. Install the matching engine, SDKs, export targets and any required licenses
+before queueing work. Run finite automation, not the editor GUI or a game session.
+
+#### Unity
+
+Set `UNITY_EDITOR` to the actual editor executable for the project's Unity version,
+not Unity Hub. Run from the project root, with the Unity Test Framework installed
+and an existing `artifacts/` directory.
+
+| Task | Example command |
+| --- | --- |
+| EditMode tests | `kiu "$UNITY_EDITOR" -batchmode -projectPath "$PWD" -runTests -testPlatform EditMode -testResults "$PWD/artifacts/editmode.xml" -logFile -` |
+| Existing synchronous build method | `kiu "$UNITY_EDITOR" -batchmode -quit -projectPath "$PWD" -executeMethod BuildAutomation.Build -logFile -` |
+
+Do **not** add `-quit` to the test invocation: it can terminate tests before they
+finish. `BuildAutomation.Build` is an illustrative project-defined static method
+in an Editor script, not a Unity built-in. It must report build failures through
+an exception or a nonzero editor exit code; asynchronous build methods need their
+own completion/exit handling. Graphics tests may still need a display/graphics
+setup despite batch mode. See [Unity Test Framework CLI](https://docs.unity3d.com/Packages/com.unity.test-framework@1.4/manual/reference-command-line.html)
+and [Editor CLI](https://docs.unity.com/en-us/engine/6000.0/manual/unity-editor/command-line-arguments/editor).
+
+#### Unreal Engine
+
+| Task | Example command |
+| --- | --- |
+| Existing project packaging/CI script | `kiu ./scripts/package-unreal.sh` |
+
+The script path is illustrative: use an existing, finite project recipe that
+calls `Engine/Build/BatchFiles/RunUAT.sh BuildCookRun` on macOS/Linux, waits for
+completion and propagates failure. Project path, platform, target and cooking,
+staging and packaging options depend on that recipe; there is no universal
+packaging command here. See [Automation Tool](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-automation-tool-overview-for-unreal-engine)
+and [build operations](https://dev.epicgames.com/documentation/unreal-engine/build-operations-cooking-packaging-deploying-and-running-projects-in-unreal-engine).
+
+#### Godot 4
+
+| Task | Example command |
+| --- | --- |
+| Headless release export | `kiu godot --headless --path . --export-release "Linux" build/game.x86_64` |
+
+Here `godot` must resolve to the matching editor executable. `Linux` is an
+illustrative **existing preset name**, matched exactly in `export_presets.cfg`;
+replace it and the output filename for your target. Install its export templates
+and create `build/` first. Keep project-specific export validation in the existing
+CI script. Project tests use the project's own runner, not a generic Godot test
+flag. See [Godot command-line export](https://docs.godotengine.org/en/stable/tutorials/editor/command_line_tutorial.html#exporting).
+
+#### Blender
+
+| Task | Example command |
+| --- | --- |
+| Render frame 1 using the scene's render/output settings | `kiu blender --background scene.blend --render-frame 1` |
+| Process a scene with an existing Python script | `kiu blender --background scene.blend --python-exit-code 1 --python scripts/process_scene.py` |
+
+Use an installed Blender executable and existing scene/script paths. Argument
+order matters: load the scene before rendering or running the script; any render
+setting overrides go before `--render-frame`. `--python-exit-code 1` reports an
+uncaught command-line Python exception as failure. See [Blender CLI arguments](https://docs.blender.org/manual/en/5.0/advanced/command_line/arguments.html).
+
+### Other toolchains
+
+Use installed project toolchains and existing executable wrappers/tasks. Examples
+below assume macOS/Linux shell syntax and configured projects.
+
+| Toolchain / task | Example command | Official reference |
+| --- | --- | --- |
+| Java/Kotlin: Gradle tests or build | `kiu ./gradlew test` / `kiu ./gradlew build` | [Gradle CLI](https://docs.gradle.org/current/userguide/command_line_interface.html) |
+| Android: debug APK | `kiu ./gradlew assembleDebug` | [Android CLI builds](https://developer.android.com/build/building-cmdline) |
+| Java: Maven verification lifecycle | `kiu ./mvnw verify` | [Maven wrapper](https://maven.apache.org/tools/wrapper/), [lifecycle](https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html) |
+| Rust: tests | `kiu cargo test` | [cargo test](https://doc.rust-lang.org/cargo/commands/cargo-test.html) |
+| Rust: release build | `kiu cargo build --release` | [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html) |
+| Rust: configured benchmarks | `kiu cargo bench` | [cargo bench](https://doc.rust-lang.org/cargo/commands/cargo-bench.html) |
+| C/C++: configured CMake build tree | `kiu cmake --build build` | [CMake build](https://cmake.org/cmake/help/latest/manual/cmake.1.html#build-a-project) |
+| C/C++: registered CTest tests | `kiu ctest --test-dir build --output-on-failure` | [CTest CLI](https://cmake.org/cmake/help/latest/manual/ctest.1.html) |
+
+Gradle needs a compatible JDK and plugins defining the selected tasks; Android
+also needs its SDK, Android Gradle plugin and matching variant task. Maven needs
+a compatible JDK and project lifecycle configuration. Rust benchmarks need the
+project's configured harness/toolchain (the built-in `#[bench]` harness needs
+nightly). CMake needs an already configured build directory and registered tests;
+`ctest --test-dir` requires CMake 3.20 or later. With multi-configuration generators,
+select the project's configuration explicitly (`cmake --build build --config Release`
+and `ctest --test-dir build -C Release --output-on-failure`).
+
+A slot covers the foreground job and its managed process group, not a CPU/GPU
+allocation. Persistent build servers, detached workers and services are subject
+to the same [execution boundaries](docs/behavior.md#boundaries) as other commands.
+
 ### Other finite, resource-intensive tasks
 
 | Task | Example command |
@@ -252,8 +449,25 @@ required by your project instructions, then launch:
 
 ```sh
 hc run --bg --parent <verified-parent-id> --cwd <absolute-project-path> \
-  --name kiu-project-tests env KIU_HERDR_STATUS=1 kiu go test ./...
+  --name project-tests-kiu env KIU_HERDR_STATUS=1 kiu --name "project — tests" go test ./...
 ```
+
+Use **`<task>-kiu`** for the Herdr terminal name, matching `<task>-agy` and
+`<task>-claude` for reviewers. For example, one task may have these child entries:
+
+```text
+unified-navigation-agy
+unified-navigation-claude
+unified-navigation-kiu
+```
+
+The `hc --name` identifies the terminal in Herdr; `kiu --name` is the readable
+job label in the shared queue, for example `Calculyo — unified navigation tests`.
+Keep the Herdr name within its 32-character limit. If separate Kiu jobs for a task
+need distinct names, put the discriminator **before** the suffix, such as
+`navigation-unit-kiu` and `navigation-system-kiu`. Keep `-kiu` at the end.
+Names are descriptive conventions: always verify that the actual command uses
+Kiu; a suffix alone does not put a command in the queue.
 
 Replace both placeholders and use the project's real test/build command. Keep
 the returned terminal ID, inspect it with `hc get` / `hc read`, and wait with
@@ -265,13 +479,14 @@ inside an agent's own terminal: root reports belong to the dedicated job termina
 
 Waiting for capacity reports **`working` with “Waiting for slot”**, never
 `blocked`. Running, descendant cleanup, completion and failure also report status.
-Only the executable name is included; arguments are not copied into status.
+The chosen job name is included; command arguments are not copied into status.
 The stock Herdr child list shows the `hc` task name and a state indicator; the
 detailed message and terminal title are available when inspecting the task.
 Kiu also prints a readable line for each phase to stderr, so a quiet command's
 terminal still shows whether it is starting, waiting, running or finished.
 Showing that message directly in the child row requires a Herdr UI customization.
-This integration does not identify which other job occupies the slot.
+While waiting, the initial Herdr message also names the occupant when its
+metadata is available. Use `kiu status --json` for a fresh snapshot.
 
 After updating the source, reinstall with `go install ./cmd/kiu` before launching
 new tasks. Already-running jobs keep their original binary and reporting mode;
@@ -288,9 +503,8 @@ Kiu does not read or replay files that a child redirects its output into.
 
 ## Development
 
-For Kiu's own test suite, run these commands directly, outside a Kiu-wrapped
-command. The current test harness launches Kiu subprocesses and requires a clean
-execution context; it does not yet clear an inherited nesting marker in every fixture.
+Kiu's test harness starts real subprocesses in isolated temporary pools and resets
+inherited execution markers in those fixtures. It does not use your live job pool.
 
 ```sh
 go test ./...
@@ -319,6 +533,9 @@ the same user. Ensure agent sandboxes use the intended host state location; do
 not use `sudo` or a container-local Kiu expecting to join your host user's pool.
 
 The directory and lock file are created with modes 0700 and 0600 respectively.
-An active reservation stores only a schema version, boot ID and process group ID.
-Command arguments and environment are not persisted.
+An active reservation contains a schema version, boot ID, process group ID and
+job metadata. Per-job records and ownership locks describe waiting supervisors.
+Metadata includes the name, executable basename, directory, process IDs and
+timestamps. Command arguments and environment are not persisted. Completed
+records are removed; abandoned ownership records are pruned under coordination.
 Admission order is best-effort, without a FIFO guarantee.

@@ -40,3 +40,13 @@ func TestDisabledReporterIsSilent(t *testing.T) {
 	r.report("working", "Waiting for slot")
 	r.report("done", "Finished")
 }
+
+func TestNamedHerdrWaitExplainsOccupantWithoutBlocking(t *testing.T) {
+	var output bytes.Buffer
+	r := statusReporter{output: &output, name: "Calculyo — system tests"}
+	r.report("working", "Waiting for slot; running: Tidudanka — full CI")
+	got := output.String()
+	if !strings.Contains(got, "Calculyo — system tests") || !strings.Contains(got, "Tidudanka — full CI") || !strings.Contains(got, "state=working:app=kiu") || strings.Contains(got, "state=blocked") {
+		t.Fatalf("incorrect named wait status: %q", got)
+	}
+}

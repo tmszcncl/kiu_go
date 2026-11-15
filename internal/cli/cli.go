@@ -1,10 +1,16 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"text/tabwriter"
+	"time"
 
+	"github.com/tmszcncl/kiu_go/internal/pool"
 	"github.com/tmszcncl/kiu_go/internal/process"
 )
 
@@ -13,14 +19,18 @@ const help = `Kiu — Keep your tasks in line.
 Usage:
   kiu <command> [arguments...]
   kiu run -- <command> [arguments...]
+  kiu --name <label> <command> [arguments...]
+  kiu --name <label> run -- <command> [arguments...]
+  kiu status [--json]
   kiu version
   kiu help
 
 Commands run directly, without an implicit shell. Arguments after the command
 belong to that command. Use an explicit shell for pipelines and other shell syntax.
+Kiu options such as --name must precede the command (or run --).
 
 Development status: one shared slot with process-group supervision.
-Foreground commands on macOS and Linux only; detached work is outside the contract.
+Noninteractive commands on macOS and Linux only; detached work is outside the contract.
 `
 
 // Run executes one CLI invocation and returns its exit status.
@@ -28,6 +38,33 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if len(args) == 0 {
 		fmt.Fprint(stdout, help)
 		return 0
+	}
+	name, named := "", false
+	for len(args) > 0 && (args[0] == "--name" || strings.HasPrefix(args[0], "--name=")) {
+		if named {
+			return usageError(stderr, "--name may only be specified once")
+		}
+		named = true
+		if args[0] == "--name" {
+			if len(args) < 2 {
+				return usageError(stderr, "--name requires a label")
+			}
+			name, args = args[1], args[2:]
+		} else {
+			name, args = strings.TrimPrefix(args[0], "--name="), args[1:]
+		}
+		if err := pool.ValidateName(name); err != nil {
+			return usageError(stderr, err.Error())
+		}
+	}
+	if len(args) == 0 {
+		return usageError(stderr, "expected a command after --name")
+	}
+	if named {
+		switch args[0] {
+		case "help", "--help", "-h", "version", "--version", "status", "config":
+			return usageError(stderr, "--name applies to commands, not administrative subcommands; use run -- to execute a reserved name")
+		}
 	}
 	switch args[0] {
 	case "help", "--help", "-h":
@@ -42,7 +79,12 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 		}
 		fmt.Fprintf(stdout, "kiu %s\n", version)
 		return 0
-	case "config", "status":
+	case "status":
+		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
+			return usageError(stderr, "expected: kiu status [--json]")
+		}
+		return status(stdout, stderr, len(args) == 2)
+	case "config":
 		return usageError(stderr, args[0]+" is not implemented yet; use 'kiu run -- "+args[0]+"' to run an executable with this name")
 	case "run":
 		if len(args) < 3 || args[1] != "--" {
@@ -57,7 +99,65 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if os.Getenv("KIU_EXECUTION_CONTEXT") != "" {
 		return usageError(stderr, "nested Kiu execution would deadlock; run the inner command without kiu")
 	}
-	return process.Run(args, stdin, stdout, stderr)
+	return process.RunNamed(args, stdin, stdout, stderr, name)
+}
+
+func status(stdout, stderr io.Writer, asJSON bool) int {
+	directory, err := pool.StateDir()
+	if err != nil {
+		fmt.Fprintln(stderr, "kiu:", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	snapshot, err := pool.ReadStatus(ctx, directory)
+	if err != nil {
+		fmt.Fprintln(stderr, "kiu: status:", err)
+		return 1
+	}
+	if asJSON {
+		err = json.NewEncoder(stdout).Encode(snapshot)
+	} else {
+		var output strings.Builder
+		fmt.Fprintf(&output, "Host: %s\nCapacity: %d\nSlot occupied: %t\nRunning: %d\nWaiting: %d\n", pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.SlotOccupied, snapshot.RunningCount, snapshot.WaitingCount)
+		for _, group := range []struct {
+			title string
+			tasks []pool.Task
+		}{{"RUNNING", snapshot.Running}, {"WAITING", snapshot.Waiting}} {
+			fmt.Fprintf(&output, "\n%s\n", group.title)
+			if len(group.tasks) == 0 {
+				output.WriteString("(none)\n")
+				continue
+			}
+			table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(table, "ID\tELAPSED\tDIRECTORY\tNAME")
+			for _, task := range group.tasks {
+				id, elapsed := "-", "unknown"
+				if len(task.ID) >= 8 {
+					id = task.ID[:8]
+				}
+				start := task.SubmittedAt
+				if task.State == "running" && task.StartedAt != nil {
+					start = *task.StartedAt
+				}
+				if !start.IsZero() {
+					duration := time.Since(start)
+					if duration < 0 {
+						duration = 0
+					}
+					elapsed = duration.Truncate(time.Second).String()
+				}
+				fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", id, elapsed, pool.DisplayText(task.Cwd), pool.DisplayText(task.Name))
+			}
+			table.Flush()
+		}
+		_, err = io.WriteString(stdout, output.String())
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "kiu: write status:", err)
+		return 1
+	}
+	return 0
 }
 
 func usageError(stderr io.Writer, message string) int {
