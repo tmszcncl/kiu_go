@@ -1,0 +1,100 @@
+# Execution and failure behavior
+
+Kiu currently supplies one shared slot without configuration. `status`, configurable
+capacity, labels, wait timeouts and no-wait mode are not implemented yet.
+
+## Supported commands
+
+Use Kiu for noninteractive foreground commands, for example `kiu go test ./...`.
+The executable and arguments are passed directly, without shell evaluation.
+Working directory, environment, piped/file stdin, stdout and stderr are inherited.
+Kiu diagnostics use stderr. Its nested-execution marker is the sole environment
+addition. Administrative commands such as `kiu version` do not acquire a slot.
+
+The worker is in a separate background terminal process group. Kiu does not provide
+PTY emulation or terminal job-control handoff. Interactive shells, password prompts,
+editors and full-screen programs are unsupported. Terminal reads fail instead of
+stopping silently on SIGTTIN; stdin from a file or pipe works. SIGTTIN and SIGTTOU
+are ignored in the worker and inherited by descendants. SIGTTOU is also ignored
+in the supervisor, so writes proceed even with `stty tostop`. Suspend/resume is
+not supported.
+
+## Cancellation
+
+SIGINT, SIGTERM, SIGHUP and SIGQUIT received by the client are forwarded through a
+private control pipe to the supervisor, then to the entire managed process group.
+The first signal starts a five-second grace period. A second cancellation, or
+expiry of that period, sends SIGKILL to the group. The slot remains reserved until
+the direct child has been reaped and the group no longer exists.
+
+If the direct child crashes or is killed independently, its original signal status
+is preserved, but remaining descendants receive SIGTERM and the same grace period.
+Crash signals such as SIGSEGV and SIGABRT are never broadcast to descendants.
+
+A waiting cancellation exits without starting the command. The usual signal status
+is returned: 130 for SIGINT, 143 for SIGTERM, 129 for SIGHUP, and 131 for SIGQUIT.
+An active cancellation returns that same convention even if the command handles
+the signal and exits successfully. If the client is killed with SIGKILL, it cannot
+return a status, but the supervisor sees pipe EOF and initiates SIGTERM cleanup.
+
+If the main command finishes while descendants remain in its group, Kiu reports
+that it is waiting for those processes. It does not silently release capacity or
+impose an execution timeout. Cancellation still works during this wait.
+
+## Forced supervisor death
+
+SIGKILL of the supervisor cannot be caught. The client returns 137, but the command
+may continue running. Its durable reservation remains and later Kiu commands wait
+until the group disappears. Afterward they recover automatically. Kiu does not
+automatically send signals based solely on abandoned metadata, because a PGID can
+be reused. A hung orphan needs manual investigation and termination of verified
+processes. A reused PGID after a crash may conservatively block admission for the
+unrelated group's lifetime. Do not delete an active reservation to bypass waiting.
+
+This policy preserves admission safety without claiming automatic termination
+after every possible process failure. It is deliberately less convenient than
+admitting another heavy command while the old one may still be running.
+
+## Boundaries
+
+- Processes that deliberately change session or process group can escape Kiu.
+- A Docker client process group is not the container's process group. Stopping the
+  local client does not prove container work stopped. Docker workflows need separate
+  acceptance tests; none have been completed yet.
+- Detached services remain outside the contract. `docker compose up -d` only wraps
+  the launch command, not the service lifetime.
+- Unix zombies can keep a group visible until they are reaped. Linux containers
+  must use a reaping init, such as Docker `--init`. Kiu does not free capacity based
+  on a racy process-table scan. An uninterruptible process can also delay cleanup.
+- Stopping or killing both supervisor and client does not stop the command by
+  itself; the reservation still protects the pool while the group exists.
+- Independent users, hosts and VMs have separate pools. Commands outside Kiu bypass
+  its cooperative admission control.
+- A state directory belongs to one PID namespace. Never share it between a host
+  and a container or between containers with different PID namespaces.
+
+## Exit codes
+
+| Situation | Status |
+| --- | --- |
+| Normal command exit | Original child exit code |
+| Command or cancellation signal | 128 + signal number |
+| Invalid CLI arguments or nested execution | 2 |
+| Internal failure, including invalid state | 1 |
+| Executable cannot start | 126 |
+| Executable missing | 127 |
+
+These overlap with possible child statuses. A status alone is not a unique error
+category; diagnostics provide the context.
+
+## Validation
+
+The tests start independent clients, supervisors and commands in isolated state
+directories, with bounded deadlines. They exercise argument boundaries, standard
+streams, exit statuses, waiting, separate working directories, signal cancellation,
+the grace period, forced client/supervisor/child death, gated startup, lingering
+descendants, corrupt reservations and unsafe state-file permissions.
+
+Local validation: macOS arm64; Linux arm64 in a Docker VM using a container with
+`--init`. The race detector complements these interprocess tests. CI, native amd64,
+real Rails/Docker CI and Flutter acceptance are still pending.

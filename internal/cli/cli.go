@@ -1,16 +1,11 @@
 package cli
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"os/signal"
-	"syscall"
 
-	"github.com/tmszcncl/kiu_go/internal/pool"
+	"github.com/tmszcncl/kiu_go/internal/process"
 )
 
 const help = `Kiu — Keep your tasks in line.
@@ -24,8 +19,8 @@ Usage:
 Commands run directly, without an implicit shell. Arguments after the command
 belong to that command. Use an explicit shell for pipelines and other shell syntax.
 
-Development status: one shared slot, with automatic waiting. Active cancellation
-and crash-safe descendant handling are unfinished; this is a prototype.
+Development status: one shared slot with process-group supervision.
+Foreground commands on macOS and Linux only; detached work is outside the contract.
 `
 
 // Run executes one CLI invocation and returns its exit status.
@@ -62,43 +57,7 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 	if os.Getenv("KIU_EXECUTION_CONTEXT") != "" {
 		return usageError(stderr, "nested Kiu execution would deadlock; run the inner command without kiu")
 	}
-	directory, err := pool.StateDir()
-	if err != nil {
-		fmt.Fprintln(stderr, "kiu:", err)
-		return 1
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	release, err := pool.Acquire(ctx, directory, func() {
-		fmt.Fprintln(stderr, "kiu: waiting for a slot (capacity: 1)")
-	})
-	cancelled := ctx.Err() != nil
-	stop()
-	if err != nil || cancelled {
-		if release != nil {
-			release()
-		}
-		if cancelled {
-			return 130
-		}
-		fmt.Fprintln(stderr, "kiu: acquire slot:", err)
-		return 1
-	}
-	defer release()
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Env = append(os.Environ(), "KIU_EXECUTION_CONTEXT=1")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return childExitCode(exitErr)
-		}
-		fmt.Fprintf(stderr, "kiu: cannot start %q: %v\n", args[0], err)
-		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
-			return 127
-		}
-		return 126
-	}
-	return 0
+	return process.Run(args, stdin, stdout, stderr)
 }
 
 func usageError(stderr io.Writer, message string) int {

@@ -10,13 +10,20 @@ overloading a development machine.
 
 This is an early development version. It runs commands and preserves argument
 boundaries, working directory, environment, standard streams and normal exit codes.
-On macOS and Linux, one shared file lock admits one command at a time across
+On macOS and Linux, one shared slot admits one command at a time across
 directories. Other invocations wait automatically. Waiting can be cancelled.
 Nested invocations are rejected to avoid deadlock.
 
-**Active cancellation and crash-safe descendant management are unfinished.**
-Killing Kiu can release its slot while a child continues running. This prototype
-is not ready to protect capacity during real builds.
+A short-lived supervisor forwards cancellation to the job's Unix process group.
+It allows five seconds for cleanup, then sends SIGKILL. A second cancellation
+skips the grace period. Killing the client triggers the same cleanup. A durable
+reservation prevents new admission if the supervisor is killed while work remains.
+
+This is a development version for **noninteractive build and test commands**.
+Interactive terminal programs and descendants that leave the managed process
+group are outside its contract. Real Docker/Rails and Flutter acceptance tests
+have not been run. See [behavior](docs/behavior.md) for failure policies and
+[architecture](docs/architecture.md) for the coordination protocol.
 
 ```sh
 go build -o kiu ./cmd/kiu
@@ -38,11 +45,13 @@ by a signal returns 128 plus the signal number.
 
 ```sh
 go test ./...
+go test -race ./... -timeout 120s
 go vet ./...
 ```
 
-Initial platform targets are macOS and Linux. Native Linux lifecycle validation
-is still pending. Windows support is planned later.
+Lifecycle tests run locally on macOS arm64 and Linux arm64 in a Docker container
+with a reaping init (`--init`). CI and amd64 native validation are pending.
+Windows support is planned later.
 
 ## License
 
@@ -57,5 +66,6 @@ variable is unset or relative. Use a local filesystem. Never remove the lock fil
 while invocations exist: different inodes would create independent pools.
 
 The directory and lock file are created with modes 0700 and 0600 respectively.
-Only the lock is stored; command arguments and environment are not persisted.
+An active reservation stores only a schema version, boot ID and process group ID.
+Command arguments and environment are not persisted.
 Admission order is best-effort, without a FIFO guarantee.

@@ -10,7 +10,16 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tmszcncl/kiu_go/internal/process"
 )
+
+func TestMain(m *testing.M) {
+	if internal, code := process.Internal(os.Args[1:]); internal {
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
+}
 
 // The test executable doubles as a child, avoiding dependencies on shell tools.
 func TestChild(t *testing.T) {
@@ -30,6 +39,8 @@ func TestChild(t *testing.T) {
 			os.Exit(0)
 		case "exit":
 			os.Exit(42)
+		case "nested":
+			os.Exit(Run([]string{"must-not-launch"}, nil, os.Stdout, os.Stderr, "test"))
 		}
 	}
 	os.Exit(99)
@@ -73,6 +84,10 @@ func TestExecution(t *testing.T) {
 	}
 	if code := Run([]string{"run", "--", executable, "-test.run=^TestChild$", "--", "exit"}, nil, io.Discard, io.Discard, "test"); code != 42 {
 		t.Fatalf("child exit: %d", code)
+	}
+	stderr.Reset()
+	if code := Run([]string{executable, "-test.run=^TestChild$", "--", "nested"}, nil, io.Discard, &stderr, "test"); code != 2 || !strings.Contains(stderr.String(), "nested Kiu execution") {
+		t.Fatalf("nested execution: exit %d, stderr %s", code, &stderr)
 	}
 }
 
