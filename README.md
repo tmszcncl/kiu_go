@@ -43,9 +43,10 @@ go vet ./...
 
 Initial platform targets are macOS and Linux. Native Linux lifecycle validation
 is still pending. Windows support is planned later.
-The module path is temporarily `kiu` until a GitHub repository is selected.
-The proposed MIT license awaits the owner's confirmation; no license is granted
-by this README.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ## Pool storage
 

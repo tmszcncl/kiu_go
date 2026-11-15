@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"kiu/internal/cli"
+	"github.com/tmszcncl/kiu_go/internal/cli"
 )
 
 var version = "dev"

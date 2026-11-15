@@ -10,7 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"kiu/internal/pool"
+	"github.com/tmszcncl/kiu_go/internal/pool"
 )
 
 const help = `Kiu — Keep your tasks in line.
