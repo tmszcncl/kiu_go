@@ -240,6 +240,52 @@ commands that exist in your project. Do not wrap `docker compose up -d` expectin
 to reserve capacity for the services it starts: the command returns while they
 continue running. See [execution boundaries](docs/behavior.md#boundaries).
 
+## Optional Herdr App / Core status
+
+Kiu can report its lifecycle to a **dedicated Herdr Core terminal** using OSC
+7501. Opt in per command with `KIU_HERDR_STATUS=1`; normal invocations are silent
+apart from normal diagnostics, and child stdout is unchanged. Reporting requires
+`HC_TERMINAL_ID` and terminal stderr. No Herdr TUI integration is involved.
+
+For agents using `hc`, first verify the parent conversation with `hc get` as
+required by your project instructions, then launch:
+
+```sh
+hc run --bg --parent <verified-parent-id> --cwd <absolute-project-path> \
+  --name kiu-project-tests env KIU_HERDR_STATUS=1 kiu go test ./...
+```
+
+Replace both placeholders and use the project's real test/build command. Keep
+the returned terminal ID, inspect it with `hc get` / `hc read`, and wait with
+`hc wait`. Do not retry just because it is queued. Clean up that exact terminal
+after collecting its exit status. To cancel, use `hc keys <id> ctrl+c`; the
+generic `hc interrupt` may choose Escape for an unfamiliar program.
+Do not set this option globally or enable it
+inside an agent's own terminal: root reports belong to the dedicated job terminal.
+
+Waiting for capacity reports **`working` with “Waiting for slot”**, never
+`blocked`. Running, descendant cleanup, completion and failure also report status.
+Only the executable name is included; arguments are not copied into status.
+The stock Herdr child list shows the `hc` task name and a state indicator; the
+detailed message and terminal title are available when inspecting the task.
+Kiu also prints a readable line for each phase to stderr, so a quiet command's
+terminal still shows whether it is starting, waiting, running or finished.
+Showing that message directly in the child row requires a Herdr UI customization.
+This integration does not identify which other job occupies the slot.
+
+After updating the source, reinstall with `go install ./cmd/kiu` before launching
+new tasks. Already-running jobs keep their original binary and reporting mode;
+do not restart CI solely to enable status reporting. Ask active agents to reread
+their updated project instructions and use the dedicated-terminal command above
+for subsequent jobs.
+
+Keep the protected command's stdout/stderr attached to its Herdr terminal so the
+peek shows live test/build output. For example, run `kiu docker compose exec -T
+app bin/ci` rather than redirecting all of `bin/ci` into a container log file.
+If a file log is required, use an existing project-approved streaming logger that
+preserves the command's exit code; a plain `command | tee log` can mask failure.
+Kiu does not read or replay files that a child redirects its output into.
+
 ## Development
 
 For Kiu's own test suite, run these commands directly, outside a Kiu-wrapped

@@ -89,9 +89,23 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
-func supervise(args []string, control *os.File) int {
+func supervise(args []string, control *os.File) (code int) {
 	// Diagnostics must not stop the background supervisor under stty tostop.
 	signal.Ignore(syscall.SIGTTOU)
+	reporter := statusReporter{name: displayExecutable(args[0])}
+	if os.Getenv("KIU_HERDR_STATUS") == "1" && os.Getenv("HC_TERMINAL_ID") != "" {
+		if info, err := os.Stderr.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			reporter.output = os.Stderr
+		}
+	}
+	reporter.report("working", "Starting")
+	defer func() {
+		if code == 0 {
+			reporter.report("done", "Finished")
+		} else {
+			reporter.report("error", fmt.Sprintf("Exited %d", code))
+		}
+	}()
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)
@@ -135,7 +149,10 @@ func supervise(args []string, control *os.File) int {
 	if err != nil {
 		return failure(os.Stderr, err)
 	}
-	lease, err := pool.AcquireLease(ctx, directory, func() { fmt.Fprintln(os.Stderr, "kiu: waiting for a slot (capacity: 1)") })
+	lease, err := pool.AcquireLease(ctx, directory, func() {
+		fmt.Fprintln(os.Stderr, "kiu: waiting for a slot (capacity: 1)")
+		reporter.report("working", "Waiting for slot")
+	})
 	acquired <- struct{}{}
 	<-watcherDone
 	if err != nil {
@@ -193,6 +210,7 @@ func supervise(args []string, control *os.File) int {
 		return 1
 	}
 	_ = gateWrite.Close()
+	reporter.report("working", "Running")
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -212,6 +230,7 @@ func supervise(args []string, control *os.File) int {
 		select {
 		case s := <-events:
 			if cancellation == 0 {
+				reporter.report("working", "Stopping")
 				cancellation = s
 				_ = syscall.Kill(-pgid, s)
 				timer = time.NewTimer(gracePeriod)
@@ -256,6 +275,7 @@ func supervise(args []string, control *os.File) int {
 				return exitCode(childErr)
 			}
 			if !announcedDescendants {
+				reporter.report("working", "Waiting for remaining processes")
 				fmt.Fprintln(os.Stderr, "kiu: waiting for remaining processes in the job's group")
 				announcedDescendants = true
 			}
