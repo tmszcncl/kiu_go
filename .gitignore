@@ -1,0 +1,4 @@
+/kiu
+/dist/
+*.test
+coverage.out
