@@ -22,8 +22,11 @@ reservation prevents new admission if the supervisor is killed while work remain
 
 This is a development version for **noninteractive build and test commands**.
 Interactive terminal programs and descendants that leave the managed process
-group are outside its contract. Real Docker/Rails and Flutter acceptance tests
-have not been run. See [behavior](docs/behavior.md) for failure policies and
+group are outside its contract. Local Flutter and Docker/Rails tests have verified
+shared-slot execution on macOS arm64. **Cancelling the Docker client can release
+the slot while container work continues**; stop and verify that specific container
+job before submitting replacement work. See [manual validation](docs/validation.md),
+[behavior](docs/behavior.md) for failure policies and
 [architecture](docs/architecture.md) for the coordination protocol.
 
 ## Installation from source
@@ -233,8 +236,12 @@ Do not add another Kiu inside the container. Docker does not automatically forwa
 Kiu's nesting marker: an inner Kiu may use an independent container pool rather
 than being rejected. Never share a state directory across PID namespaces.
 The slot covers the foreground Docker
-client's lifetime; cancellation does not prove that work inside the container has
-stopped. These are usage templates, **not completed Docker acceptance tests**.
+client's lifetime. A controlled cancellation test confirmed that container work
+can continue after the local client exits and Kiu releases the slot. Verify and
+stop that specific container job before retrying; do not stop unrelated services.
+A targeted Rails test and a local Flutter test have verified shared-slot behavior
+in both directions on macOS arm64. Other examples, including full `bin/ci`, remain
+usage templates. See [manual validation](docs/validation.md).
 `compose run` can start dependency services that outlive the command; those
 services are not reserved by Kiu after the foreground client exits. See the
 [Compose run documentation](https://docs.docker.com/reference/cli/docker/compose/run/).
@@ -264,7 +271,9 @@ Wrap the existing finite, noninteractive test command rather than changing its
 runner. The test runner must finish and clean up the app it launches; do not
 substitute a persistent application session for the test command.
 Start emulators/devices separately, outside Kiu. These examples require
-appropriate SDKs and targets and have **not been acceptance-tested through Kiu**.
+appropriate SDKs and targets. A targeted local `flutter test` has been tested
+through Kiu alongside Docker/Rails on macOS arm64; the builds and device-based
+integration examples above have not. See [manual validation](docs/validation.md).
 Select a device explicitly for device-based integration tests to avoid a device
 selection prompt. See [Flutter's integration-test guide](https://docs.flutter.dev/testing/integration-tests)
 for target-specific setup; web tests may need a different runner.

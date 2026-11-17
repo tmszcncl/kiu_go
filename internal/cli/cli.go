@@ -118,46 +118,49 @@ func status(stdout, stderr io.Writer, asJSON bool) int {
 	if asJSON {
 		err = json.NewEncoder(stdout).Encode(snapshot)
 	} else {
-		var output strings.Builder
-		fmt.Fprintf(&output, "Host: %s\nCapacity: %d\nSlot occupied: %t\nRunning: %d\nWaiting: %d\n", pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.SlotOccupied, snapshot.RunningCount, snapshot.WaitingCount)
-		for _, group := range []struct {
-			title string
-			tasks []pool.Task
-		}{{"RUNNING", snapshot.Running}, {"WAITING", snapshot.Waiting}} {
-			fmt.Fprintf(&output, "\n%s\n", group.title)
-			if len(group.tasks) == 0 {
-				output.WriteString("(none)\n")
-				continue
-			}
-			table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(table, "ID\tELAPSED\tDIRECTORY\tNAME")
-			for _, task := range group.tasks {
-				id, elapsed := "-", "unknown"
-				if len(task.ID) >= 8 {
-					id = task.ID[:8]
-				}
-				start := task.SubmittedAt
-				if task.State == "running" && task.StartedAt != nil {
-					start = *task.StartedAt
-				}
-				if !start.IsZero() {
-					duration := time.Since(start)
-					if duration < 0 {
-						duration = 0
-					}
-					elapsed = duration.Truncate(time.Second).String()
-				}
-				fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", id, elapsed, pool.DisplayText(task.Cwd), pool.DisplayText(task.Name))
-			}
-			table.Flush()
-		}
-		_, err = io.WriteString(stdout, output.String())
+		_, err = io.WriteString(stdout, formatStatus(snapshot))
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "kiu: write status:", err)
 		return 1
 	}
 	return 0
+}
+
+func formatStatus(snapshot pool.Snapshot) string {
+	var output strings.Builder
+	fmt.Fprintf(&output, "Host: %s\nCapacity: %d\nSlot occupied: %t\nRunning: %d\nWaiting: %d\n", pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.SlotOccupied, snapshot.RunningCount, snapshot.WaitingCount)
+	for _, group := range []struct {
+		title string
+		tasks []pool.Task
+	}{{"RUNNING", snapshot.Running}, {"WAITING", snapshot.Waiting}} {
+		if len(group.tasks) == 0 {
+			continue
+		}
+		fmt.Fprintf(&output, "\n%s\n", group.title)
+		table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "ID\tELAPSED\tDIRECTORY\tNAME")
+		for _, task := range group.tasks {
+			id, elapsed := "-", "unknown"
+			if len(task.ID) >= 8 {
+				id = task.ID[:8]
+			}
+			start := task.SubmittedAt
+			if task.State == "running" && task.StartedAt != nil {
+				start = *task.StartedAt
+			}
+			if !start.IsZero() {
+				duration := time.Since(start)
+				if duration < 0 {
+					duration = 0
+				}
+				elapsed = duration.Truncate(time.Second).String()
+			}
+			fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", id, elapsed, pool.DisplayText(task.Cwd), pool.DisplayText(task.Name))
+		}
+		table.Flush()
+	}
+	return output.String()
 }
 
 func usageError(stderr io.Writer, message string) int {

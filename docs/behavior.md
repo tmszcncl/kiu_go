@@ -60,8 +60,10 @@ admitting another heavy command while the old one may still be running.
 
 - Processes that deliberately change session or process group can escape Kiu.
 - A Docker client process group is not the container's process group. Stopping the
-  local client does not prove container work stopped. Docker workflows need separate
-  acceptance tests; none have been completed yet.
+  local client does not prove container work stopped. A controlled macOS test
+  confirmed that container work continued after cancellation released the host
+  slot and admitted the next command. Verify and stop that specific container job
+  before retrying. See [manual validation](validation.md).
 - Detached services remain outside the contract. `docker compose up -d` only wraps
   the launch command, not the service lifetime.
 - Unix zombies can keep a group visible until they are reaped. Linux containers
@@ -97,8 +99,12 @@ the grace period, forced client/supervisor/child death, gated startup, lingering
 descendants, corrupt reservations and unsafe state-file permissions.
 
 Local validation: macOS arm64; Linux arm64 in a Docker VM using a container with
-`--init`. The race detector complements these interprocess tests. CI, native amd64,
-real Rails/Docker CI and Flutter acceptance are still pending.
+`--init`. The race detector complements these interprocess tests. Targeted local
+Flutter and Docker/Rails tests also passed shared-slot checks in both directions
+on macOS arm64; a controlled Docker cancellation exposed the container-lifetime
+limitation described above. See [manual validation](validation.md). CI, native
+amd64, full Rails CI, Flutter builds/device tests and equivalent Linux real-workflow
+acceptance remain pending.
 
 ## Status JSON schema, version 1
 

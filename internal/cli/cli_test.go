@@ -241,3 +241,38 @@ func TestWrappedCommandCanQueryNamedStatusJSON(t *testing.T) {
 		t.Fatalf("privacy/output regression: stdout=%s stderr=%s", &stdout, &stderr)
 	}
 }
+
+func TestStatusOmitsEmptySections(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		running, waiting bool
+	}{
+		{"idle", false, false},
+		{"running only", true, false},
+		{"waiting only", false, true},
+		{"running and waiting", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := pool.Snapshot{Host: "test-host", Capacity: 1}
+			if tc.running {
+				snapshot.Running = []pool.Task{{Name: "active-test", State: "running"}}
+			}
+			if tc.waiting {
+				snapshot.Waiting = []pool.Task{{Name: "queued-test", State: "waiting"}}
+			}
+			snapshot.RunningCount = len(snapshot.Running)
+			snapshot.WaitingCount = len(snapshot.Waiting)
+			snapshot.SlotOccupied = tc.running
+			got := formatStatus(snapshot)
+			if strings.Contains(got, "\nRUNNING\n") != tc.running || strings.Contains(got, "active-test") != tc.running {
+				t.Fatalf("incorrect running section: %s", got)
+			}
+			if strings.Contains(got, "\nWAITING\n") != tc.waiting || strings.Contains(got, "queued-test") != tc.waiting {
+				t.Fatalf("incorrect waiting section: %s", got)
+			}
+			if strings.Contains(got, "(none)") || !strings.Contains(got, fmt.Sprintf("Running: %d\nWaiting: %d\n", snapshot.RunningCount, snapshot.WaitingCount)) {
+				t.Fatalf("incorrect summary: %s", got)
+			}
+		})
+	}
+}

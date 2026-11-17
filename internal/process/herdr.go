@@ -21,7 +21,7 @@ func (r statusReporter) report(state, message string) {
 	if r.output == nil {
 		return
 	}
-	title := "Kiu: " + message + " — " + r.name
+	title := "kiu: " + message + " — " + r.name
 	// A peek must be useful even when the command itself is quiet or writes its
 	// output to a file. OSC reports alone are intentionally invisible in a terminal.
 	fmt.Fprintln(r.output, title)

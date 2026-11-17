@@ -12,7 +12,7 @@ func TestWaitingStatusDoesNotRequestUserAction(t *testing.T) {
 	r := statusReporter{output: &output, name: "go"}
 	r.report("working", "Waiting for slot")
 	report := output.String()
-	if !strings.HasPrefix(report, "Kiu: Waiting for slot — go\n") {
+	if !strings.HasPrefix(report, "kiu: Waiting for slot — go\n") {
 		t.Fatalf("peek must show a readable status: %q", report)
 	}
 	if !strings.Contains(report, "7501;state=working:app=kiu:msg=") || strings.Contains(report, "blocked") {
@@ -20,7 +20,7 @@ func TestWaitingStatusDoesNotRequestUserAction(t *testing.T) {
 	}
 	encoded := strings.Split(strings.Split(report, ":msg=")[1], "\x1b")[0]
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || string(decoded) != "Kiu: Waiting for slot — go" {
+	if err != nil || string(decoded) != "kiu: Waiting for slot — go" {
 		t.Fatalf("status message: %q (%v)", decoded, err)
 	}
 }
