@@ -128,6 +128,11 @@ func status(stdout, stderr io.Writer, asJSON bool) int {
 }
 
 func formatStatus(snapshot pool.Snapshot) string {
+	return formatStatusTable(snapshot, nil)
+}
+
+// A non-nil CPU map enables the live view's CPU column.
+func formatStatusTable(snapshot pool.Snapshot, cpuByGroup map[int]float64) string {
 	var output strings.Builder
 	fmt.Fprintf(&output, "\nKiu — %s\n────────────────────────────────────────\n\nCapacity: %d\nRunning:  %d\nWaiting:  %d\n", pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.RunningCount, snapshot.WaitingCount)
 	if len(snapshot.Running)+len(snapshot.Waiting) == 0 {
@@ -140,8 +145,13 @@ func formatStatus(snapshot pool.Snapshot) string {
 	}
 	output.WriteByte('\n')
 	table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "ID\tSTATUS\tNAME")
-	fmt.Fprintln(table, "────────\t─────────────\t────")
+	if cpuByGroup == nil {
+		fmt.Fprintln(table, "ID\tSTATUS\tNAME")
+		fmt.Fprintln(table, "────────\t─────────────\t────")
+	} else {
+		fmt.Fprintln(table, "ID\tSTATUS\tCPU\tNAME")
+		fmt.Fprintln(table, "────────\t─────────────\t───\t────")
+	}
 	for _, group := range []struct {
 		state string
 		tasks []pool.Task
@@ -162,7 +172,14 @@ func formatStatus(snapshot pool.Snapshot) string {
 				}
 				elapsed = duration.Truncate(time.Second).String()
 			}
-			fmt.Fprintf(table, "%s\t%s %s\t%s\n", id, group.state, elapsed, strings.TrimSpace(pool.DisplayText(task.Name)))
+			fmt.Fprintf(table, "%s\t%s %s\t", id, group.state, elapsed)
+			if cpuByGroup != nil {
+				if cpu, ok := cpuByGroup[task.PGID]; ok && group.state == "running" {
+					fmt.Fprintf(table, "%.0f%%", cpu)
+				}
+				fmt.Fprint(table, "\t")
+			}
+			fmt.Fprintln(table, strings.TrimSpace(pool.DisplayText(task.Name)))
 		}
 	}
 	table.Flush()

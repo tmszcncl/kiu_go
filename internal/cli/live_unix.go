@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -83,6 +86,7 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var dockerCPU dockerCPUMonitor
 	for ctx.Err() == nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		snapshot, readErr := pool.ReadStatus(readCtx, directory)
@@ -90,9 +94,28 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 		if ctx.Err() != nil {
 			return nil
 		}
-		frame := formatStatus(snapshot)
+		var frame string
 		if readErr != nil {
 			frame = "\n" + pool.DisplayText(readErr.Error()) + "\n"
+		} else {
+			cpuByGroup := make(map[int]float64)
+			if len(snapshot.Running) > 0 {
+				task := snapshot.Running[0]
+				switch {
+				case task.Executable == "docker":
+					if cpu, ok := dockerCPU.sample(ctx, task); ok {
+						cpuByGroup[task.PGID] = cpu
+					}
+				case task.PGID > 0:
+					cpuCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+					cpuByGroup = readProcessCPU(cpuCtx)
+					cancel()
+				}
+			}
+			frame = formatStatusTable(snapshot, cpuByGroup)
+		}
+		if ctx.Err() != nil {
+			return nil
 		}
 		if err := writeLiveFrame(output, frame); err != nil {
 			return err
@@ -103,6 +126,37 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 		}
 	}
 	return nil
+}
+
+func readProcessCPU(ctx context.Context) map[int]float64 {
+	cmd := exec.CommandContext(ctx, "ps", "-ax", "-o", "pgid=", "-o", "pcpu=")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	output, err := cmd.Output()
+	if err != nil {
+		return map[int]float64{}
+	}
+	return parseProcessCPU(string(output))
+}
+
+func parseProcessCPU(output string) map[int]float64 {
+	cpuByGroup := make(map[int]float64)
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pgid, pgidErr := strconv.Atoi(fields[0])
+		cpu, valid := parseCPUPercent(fields[1])
+		if pgidErr == nil && valid && pgid > 0 {
+			cpuByGroup[pgid] += cpu
+		}
+	}
+	return cpuByGroup
+}
+
+func parseCPUPercent(value string) (float64, bool) {
+	cpu, err := strconv.ParseFloat(value, 64)
+	return cpu, err == nil && cpu >= 0 && !math.IsInf(cpu, 0)
 }
 
 func readLiveKeys(ctx context.Context, fd int) error {

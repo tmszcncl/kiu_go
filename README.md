@@ -122,6 +122,14 @@ The initial wait message is a snapshot. Run `kiu` with no arguments in a termina
 to open a full-screen queue view that refreshes once a second. Press `q` or
 `Ctrl+C` to close the view and return to the previous screen. The view leaves
 the job slot available and jobs keep running when you close it.
+The live table shows CPU for the running job by summing the OS-reported usage
+of its process group. One fully used logical CPU is 100%. Waiting jobs have a
+blank CPU cell. macOS reports recent usage and Linux reports a lifetime average
+per process.
+For `docker compose exec [-T] SERVICE COMMAND`, Kiu looks up the service by
+the job's working directory in the Docker context available to the viewer. If
+exactly one running container matches, the cell shows that container's total CPU.
+Unsupported Docker invocations and ambiguous matches leave the cell blank.
 
 For a single snapshot, use either command below. With redirected input or output,
 bare `kiu` also prints a single text snapshot. For usage help, run `kiu help`.
