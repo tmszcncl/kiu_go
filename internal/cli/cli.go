@@ -129,24 +129,30 @@ func status(stdout, stderr io.Writer, asJSON bool) int {
 
 func formatStatus(snapshot pool.Snapshot) string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "Host: %s\nCapacity: %d\nSlot occupied: %t\nRunning: %d\nWaiting: %d\n", pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.SlotOccupied, snapshot.RunningCount, snapshot.WaitingCount)
-	for _, group := range []struct {
-		title string
-		tasks []pool.Task
-	}{{"RUNNING", snapshot.Running}, {"WAITING", snapshot.Waiting}} {
-		if len(group.tasks) == 0 {
-			continue
+	fmt.Fprintf(&output, "\nKiu — %s\n────────────────────────────────────────\n\nCapacity: %d\nRunning:  %d\nWaiting:  %d\n", pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.RunningCount, snapshot.WaitingCount)
+	if len(snapshot.Running)+len(snapshot.Waiting) == 0 {
+		if snapshot.SlotOccupied {
+			output.WriteString("\nJob active; details unavailable.\n\n")
+		} else {
+			output.WriteByte('\n')
 		}
-		fmt.Fprintf(&output, "\n%s\n", group.title)
-		table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(table, "ID\tELAPSED\tDIRECTORY\tNAME")
+		return output.String()
+	}
+	output.WriteByte('\n')
+	table := tabwriter.NewWriter(&output, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "ID\tSTATUS\tNAME")
+	fmt.Fprintln(table, "────────\t─────────────\t────")
+	for _, group := range []struct {
+		state string
+		tasks []pool.Task
+	}{{"running", snapshot.Running}, {"waiting", snapshot.Waiting}} {
 		for _, task := range group.tasks {
 			id, elapsed := "-", "unknown"
 			if len(task.ID) >= 8 {
 				id = task.ID[:8]
 			}
 			start := task.SubmittedAt
-			if task.State == "running" && task.StartedAt != nil {
+			if group.state == "running" && task.StartedAt != nil {
 				start = *task.StartedAt
 			}
 			if !start.IsZero() {
@@ -156,10 +162,11 @@ func formatStatus(snapshot pool.Snapshot) string {
 				}
 				elapsed = duration.Truncate(time.Second).String()
 			}
-			fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", id, elapsed, pool.DisplayText(task.Cwd), pool.DisplayText(task.Name))
+			fmt.Fprintf(table, "%s\t%s %s\t%s\n", id, group.state, elapsed, strings.TrimSpace(pool.DisplayText(task.Name)))
 		}
-		table.Flush()
 	}
+	table.Flush()
+	output.WriteByte('\n')
 	return output.String()
 }
 

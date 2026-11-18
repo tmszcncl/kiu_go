@@ -126,9 +126,10 @@ kiu status
 kiu status --json
 ```
 
-Status shows names, directories, IDs, submission/start times and process IDs.
-The human-readable view includes elapsed running/waiting durations; the JSON
-schema is documented in [behavior](docs/behavior.md#status-json-schema-version-1).
+The human-readable view uses one `ID STATUS NAME` table, with running
+jobs before waiting jobs and no empty table when idle. The status includes elapsed time: running
+time for active jobs and waiting time for queued jobs. Directories, submission/start
+times and process IDs remain available in JSON; its schema is documented in [behavior](docs/behavior.md#status-json-schema-version-1).
 The waiting count includes the invocation printing that wait message. Submission-time display
 order does not promise FIFO, a queue position or an estimated start time.
 An older binary or a brief admission transition may occupy the slot without

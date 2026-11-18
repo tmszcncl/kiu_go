@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tmszcncl/kiu_go/internal/pool"
 	"github.com/tmszcncl/kiu_go/internal/process"
@@ -242,7 +243,7 @@ func TestWrappedCommandCanQueryNamedStatusJSON(t *testing.T) {
 	}
 }
 
-func TestStatusOmitsEmptySections(t *testing.T) {
+func TestStatusUsesSingleTable(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		running, waiting bool
@@ -255,24 +256,112 @@ func TestStatusOmitsEmptySections(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			snapshot := pool.Snapshot{Host: "test-host", Capacity: 1}
 			if tc.running {
-				snapshot.Running = []pool.Task{{Name: "active-test", State: "running"}}
+				snapshot.Running = []pool.Task{{Name: "active-test", State: "running", Cwd: "/private/running-directory"}}
 			}
 			if tc.waiting {
-				snapshot.Waiting = []pool.Task{{Name: "queued-test", State: "waiting"}}
+				snapshot.Waiting = []pool.Task{{Name: "queued-test", State: "waiting", Cwd: "/private/waiting-directory"}}
 			}
 			snapshot.RunningCount = len(snapshot.Running)
 			snapshot.WaitingCount = len(snapshot.Waiting)
 			snapshot.SlotOccupied = tc.running
 			got := formatStatus(snapshot)
-			if strings.Contains(got, "\nRUNNING\n") != tc.running || strings.Contains(got, "active-test") != tc.running {
+			if strings.Contains(got, "running") != tc.running || strings.Contains(got, "active-test") != tc.running {
 				t.Fatalf("incorrect running section: %s", got)
 			}
-			if strings.Contains(got, "\nWAITING\n") != tc.waiting || strings.Contains(got, "queued-test") != tc.waiting {
+			if strings.Contains(got, "waiting") != tc.waiting || strings.Contains(got, "queued-test") != tc.waiting {
 				t.Fatalf("incorrect waiting section: %s", got)
 			}
-			if strings.Contains(got, "(none)") || !strings.Contains(got, fmt.Sprintf("Running: %d\nWaiting: %d\n", snapshot.RunningCount, snapshot.WaitingCount)) {
+			wantHeaders := 0
+			if tc.running || tc.waiting {
+				wantHeaders = 1
+			}
+			if strings.Count(got, "STATUS") != wantHeaders || strings.Contains(got, "Slot:") || strings.Contains(got, "|") || strings.Contains(got, "DIRECTORY") || strings.Contains(got, "/private/") {
+				t.Fatalf("incorrect table layout: %s", got)
+			}
+			if tc.running && tc.waiting && strings.Index(got, "active-test") > strings.Index(got, "queued-test") {
+				t.Fatalf("running jobs must precede waiting jobs: %s", got)
+			}
+			if strings.Contains(got, "(none)") || !strings.Contains(got, fmt.Sprintf("Capacity: %d\nRunning:  %d\nWaiting:  %d\n", snapshot.Capacity, snapshot.RunningCount, snapshot.WaitingCount)) {
 				t.Fatalf("incorrect summary: %s", got)
 			}
 		})
 	}
+}
+
+func TestStatusElapsedUsesStartForRunningAndSubmissionForWaiting(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-2 * time.Minute)
+	submitted := now.Add(-10 * time.Minute)
+	got := formatStatus(pool.Snapshot{
+		Running: []pool.Task{{ID: "12345678abcdef", State: "running", Name: "active", SubmittedAt: submitted, StartedAt: &started}},
+		Waiting: []pool.Task{{ID: "abcdef12345678", State: "waiting", Name: "queued", SubmittedAt: submitted}},
+	})
+	var rows int
+	for _, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || (fields[1] != "running" && fields[1] != "waiting") {
+			continue
+		}
+		rows++
+		duration, err := time.ParseDuration(fields[2])
+		want := 2 * time.Minute
+		if fields[1] == "waiting" {
+			want = 10 * time.Minute
+		}
+		if err != nil || duration < want || duration >= want+time.Minute {
+			t.Fatalf("incorrect elapsed time: %q (%v)", line, err)
+		}
+	}
+	if rows != 2 {
+		t.Fatalf("expected two task rows: %s", got)
+	}
+}
+
+func TestStatusIdlePresentation(t *testing.T) {
+	got := formatStatus(pool.Snapshot{Host: "workstation", Capacity: 1})
+	want := "\nKiu — workstation\n────────────────────────────────────────\n\nCapacity: 1\nRunning:  0\nWaiting:  0\n\n"
+	if got != want {
+		t.Fatalf("idle view:\n got %q\nwant %q", got, want)
+	}
+	occupied := formatStatus(pool.Snapshot{Host: "workstation", Capacity: 1, SlotOccupied: true})
+	if strings.Contains(occupied, "Queue is empty") || !strings.Contains(occupied, "Job active; details unavailable.") {
+		t.Fatalf("occupied slot must not look idle: %s", occupied)
+	}
+}
+
+func TestStatusNameColumnAlignment(t *testing.T) {
+	now := time.Now()
+	started := now.Add(-333 * time.Second)
+	got := formatStatus(pool.Snapshot{
+		Host: "workstation", Capacity: 1, SlotOccupied: true, RunningCount: 1, WaitingCount: 1,
+		Running: []pool.Task{{ID: "12345678abcdef", Name: "  tidudanka — CI  ", StartedAt: &started}},
+		Waiting: []pool.Task{{ID: "abcdef12345678", Name: "calculyo — acceptance", SubmittedAt: now.Add(-106 * time.Second)}},
+	})
+	var column = -1
+	var rows int
+	for _, line := range strings.Split(got, "\n") {
+		var label string
+		switch {
+		case strings.HasPrefix(line, "ID "):
+			label = "NAME"
+		case strings.HasPrefix(line, "12345678 "):
+			label = "tidudanka"
+		case strings.HasPrefix(line, "abcdef12 "):
+			label = "calculyo"
+		default:
+			continue
+		}
+		index := len([]rune(line[:strings.Index(line, label)]))
+		if column < 0 {
+			column = index
+		}
+		if index != column {
+			t.Fatalf("name column shifted: %s", got)
+		}
+		rows++
+	}
+	if rows != 3 || strings.Contains(got, "ELAPSED") || !strings.Contains(got, "running 5m") || !strings.Contains(got, "waiting 1m") {
+		t.Fatalf("incorrect combined status table: %s", got)
+	}
+	t.Log("\n" + got)
 }
