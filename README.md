@@ -118,8 +118,13 @@ When admitted, it prints:
 kiu: starting — Calculyo — system tests (waited 1m8s)
 ```
 
-The initial wait message is a snapshot, not a continuously refreshed queue view.
-To inspect the current state without acquiring a job slot:
+The initial wait message is a snapshot. Run `kiu` with no arguments in a terminal
+to open a full-screen queue view that refreshes once a second. Press `q` or
+`Ctrl+C` to close the view and return to the previous screen. The view leaves
+the job slot available and jobs keep running when you close it.
+
+For a single snapshot, use either command below. With redirected input or output,
+bare `kiu` also prints a single text snapshot. For usage help, run `kiu help`.
 
 ```sh
 kiu status

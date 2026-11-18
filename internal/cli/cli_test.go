@@ -23,6 +23,39 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestBareKiuOutsideTerminalPrintsStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var bare, explicit, stderr bytes.Buffer
+	for _, invocation := range []struct {
+		args []string
+		out  *bytes.Buffer
+	}{{nil, &bare}, {[]string{"status"}, &explicit}} {
+		if code := Run(invocation.args, strings.NewReader(""), invocation.out, &stderr, "test"); code != 0 {
+			t.Fatalf("exit %d: %s", code, &stderr)
+		}
+	}
+	if bare.String() != explicit.String() || strings.Contains(bare.String(), "\x1b") {
+		t.Fatalf("bare kiu: %q, status: %q", &bare, &explicit)
+	}
+}
+
+func TestHelpDescribesBareKiu(t *testing.T) {
+	for _, arg := range []string{"help", "--help", "-h"} {
+		t.Run(arg, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{arg}, nil, &stdout, &stderr, "test"); code != 0 {
+				t.Fatalf("exit %d: %s", code, &stderr)
+			}
+			for _, line := range []string{"Open the live queue", "kiu <command> [arguments...]", "kiu status [--json]"} {
+				if !strings.Contains(stdout.String(), line) {
+					t.Errorf("help missing %q", line)
+				}
+			}
+		})
+	}
+}
+
 // The test executable doubles as a child, avoiding dependencies on shell tools.
 func TestChild(t *testing.T) {
 	if os.Getenv("KIU_TEST_CHILD") != "1" {

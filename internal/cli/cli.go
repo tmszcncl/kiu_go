@@ -17,6 +17,7 @@ import (
 const help = `Kiu — Keep your tasks in line.
 
 Usage:
+  kiu                         Open the live queue (one snapshot outside a terminal)
   kiu <command> [arguments...]
   kiu run -- <command> [arguments...]
   kiu --name <label> <command> [arguments...]
@@ -36,8 +37,7 @@ Noninteractive commands on macOS and Linux only; detached work is outside the co
 // Run executes one CLI invocation and returns its exit status.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version string) int {
 	if len(args) == 0 {
-		fmt.Fprint(stdout, help)
-		return 0
+		return liveStatus(stdin, stdout, stderr)
 	}
 	name, named := "", false
 	for len(args) > 0 && (args[0] == "--name" || strings.HasPrefix(args[0], "--name=")) {
