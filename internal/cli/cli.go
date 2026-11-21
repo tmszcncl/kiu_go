@@ -103,10 +103,6 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer, version strin
 }
 
 func status(stdout, stderr io.Writer, asJSON bool) int {
-	return writeStatus(stdout, stderr, asJSON, formatStatus)
-}
-
-func writeStatus(stdout, stderr io.Writer, asJSON bool, format func(pool.Snapshot) string) int {
 	directory, err := pool.StateDir()
 	if err != nil {
 		fmt.Fprintln(stderr, "kiu:", err)
@@ -122,7 +118,7 @@ func writeStatus(stdout, stderr io.Writer, asJSON bool, format func(pool.Snapsho
 	if asJSON {
 		err = json.NewEncoder(stdout).Encode(snapshot)
 	} else {
-		_, err = io.WriteString(stdout, format(snapshot))
+		_, err = io.WriteString(stdout, formatStatus(snapshot))
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "kiu: write status:", err)
@@ -135,33 +131,34 @@ func formatStatus(snapshot pool.Snapshot) string {
 	return formatStatusTable(snapshot, nil)
 }
 
+// writeQueueSummary returns the number of lines written for the live view's layout.
+func writeQueueSummary(output io.Writer, snapshot pool.Snapshot) int {
+	fmt.Fprintf(output, "\nKiu — %s\n────────────────────────────────────────\n\n", pool.DisplayText(snapshot.Host))
+	rows := 4
+	if snapshot.RunningCount > 0 {
+		fmt.Fprintf(output, "Running: %d/%d\n", snapshot.RunningCount, snapshot.Capacity)
+		rows++
+	}
+	if snapshot.WaitingCount > 0 {
+		fmt.Fprintf(output, "Waiting: %d\n", snapshot.WaitingCount)
+		rows++
+	}
+	return rows
+}
+
 // A non-nil CPU map enables the live view's CPU column.
 func formatStatusTable(snapshot pool.Snapshot, cpuByGroup map[int]float64) string {
-	return formatQueue(snapshot, cpuByGroup, true)
-}
-
-func writeQueueSummary(output io.Writer, snapshot pool.Snapshot, showEmptyWaiting bool) int {
-	fmt.Fprintf(output, "\nKiu — %s\n────────────────────────────────────────\n\nCapacity: %d\nRunning:  %d\n",
-		pool.DisplayText(snapshot.Host), snapshot.Capacity, snapshot.RunningCount)
-	if showEmptyWaiting || snapshot.WaitingCount > 0 {
-		fmt.Fprintf(output, "Waiting:  %d\n", snapshot.WaitingCount)
-		return 7
-	}
-	return 6
-}
-
-func formatQueue(snapshot pool.Snapshot, cpuByGroup map[int]float64, showEmptyWaiting bool) string {
 	var output strings.Builder
-	writeQueueSummary(&output, snapshot, showEmptyWaiting)
+	writeQueueSummary(&output, snapshot)
+	if snapshot.RunningCount > 0 || snapshot.WaitingCount > 0 {
+		output.WriteByte('\n')
+	}
 	if len(snapshot.Running)+len(snapshot.Waiting) == 0 {
 		if snapshot.SlotOccupied {
-			output.WriteString("\nJob active; details unavailable.\n\n")
-		} else {
-			output.WriteByte('\n')
+			output.WriteString("Job active; details unavailable.\n\n")
 		}
 		return output.String()
 	}
-	output.WriteByte('\n')
 	writeTaskTable(&output, snapshot, cpuByGroup)
 	output.WriteByte('\n')
 	return output.String()

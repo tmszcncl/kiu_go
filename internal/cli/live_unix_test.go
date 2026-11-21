@@ -85,10 +85,10 @@ func TestLiveQuitKeys(t *testing.T) {
 
 func TestLiveFrameReplacesPreviousScreen(t *testing.T) {
 	var output bytes.Buffer
-	if err := writeLiveFrame(&output, "Running:  1\nWaiting:  2\n"); err != nil {
+	if err := writeLiveFrame(&output, "Running: 1/1\nWaiting: 2\n"); err != nil {
 		t.Fatal(err)
 	}
-	want := "\x1b[H\x1b[2J\x1b[?7lq / Ctrl+C — quit\r\nRunning:  1\r\nWaiting:  2\x1b[?7h"
+	want := "\x1b[H\x1b[2J\x1b[?7lq / Ctrl+C — quit\r\nRunning: 1/1\r\nWaiting: 2\x1b[?7h"
 	if output.String() != want {
 		t.Fatalf("frame = %q, want %q", &output, want)
 	}
@@ -159,7 +159,7 @@ func TestLiveStatusPreservesQueueLayoutAndHidesEmptySections(t *testing.T) {
 		Running: []pool.Task{{Name: "Build"}},
 	}
 	frame, _ := formatLiveStatus(snapshot, map[int]float64{}, nil, nil, 24, 0)
-	for _, want := range []string{"Kiu — local\n", "Capacity: 1\nRunning:  1\n\n", "Build"} {
+	for _, want := range []string{"Kiu — local\n", "Running: 1/1\n\n", "Build"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("missing %q in frame:\n%s", want, frame)
 		}
@@ -171,7 +171,7 @@ func TestLiveStatusPreservesQueueLayoutAndHidesEmptySections(t *testing.T) {
 	snapshot.WaitingCount = 1
 	snapshot.Waiting = []pool.Task{{Name: "Queue item"}}
 	frame, _ = formatLiveStatus(snapshot, nil, []pool.Result{{Name: "Finished"}}, nil, 24, 0)
-	if !strings.Contains(frame, "Waiting:  1\n") || !strings.Contains(frame, "\n\nHistory\n") {
+	if !strings.Contains(frame, "Waiting: 1\n") || !strings.Contains(frame, "\n\nHistory\n") {
 		t.Fatalf("missing waiting count or history in frame:\n%s", frame)
 	}
 }

@@ -40,8 +40,8 @@ func TestBareKiuOutsideTerminalPrintsStatusAndHistory(t *testing.T) {
 			t.Fatalf("exit %d: %s", code, &stderr)
 		}
 	}
-	if !strings.HasPrefix(bare.String(), strings.Replace(explicit.String(), "Waiting:  0\n", "", 1)) ||
-		strings.Contains(bare.String(), "Waiting:") ||
+	if !strings.HasPrefix(bare.String(), explicit.String()) ||
+		strings.Contains(bare.String(), "Waiting:") || strings.Contains(bare.String(), "Running:") ||
 		!strings.Contains(bare.String(), "failed (exit 42)") || !strings.Contains(bare.String(), "Recorded command") ||
 		strings.Contains(explicit.String(), "History") || strings.Contains(bare.String(), "\x1b") {
 		t.Fatalf("bare kiu: %q, status: %q", &bare, &explicit)
@@ -295,7 +295,7 @@ func TestStatusUsesSingleTable(t *testing.T) {
 		{"running and waiting", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			snapshot := pool.Snapshot{Host: "test-host", Capacity: 1}
+			snapshot := pool.Snapshot{Host: "test-host", Capacity: 3}
 			if tc.running {
 				snapshot.Running = []pool.Task{{Name: "active-test", State: "running", Cwd: "/private/running-directory"}}
 			}
@@ -322,7 +322,10 @@ func TestStatusUsesSingleTable(t *testing.T) {
 			if tc.running && tc.waiting && strings.Index(got, "active-test") > strings.Index(got, "queued-test") {
 				t.Fatalf("running jobs must precede waiting jobs: %s", got)
 			}
-			if strings.Contains(got, "(none)") || !strings.Contains(got, fmt.Sprintf("Capacity: %d\nRunning:  %d\nWaiting:  %d\n", snapshot.Capacity, snapshot.RunningCount, snapshot.WaitingCount)) {
+			if strings.Contains(got, "(none)") || strings.Contains(got, "Capacity:") ||
+				strings.Contains(got, "Running:") != tc.running || strings.Contains(got, "Waiting:") != tc.waiting ||
+				(tc.running && !strings.Contains(got, "Running: 1/3\n")) ||
+				(tc.waiting && !strings.Contains(got, "Waiting: 1\n")) {
 				t.Fatalf("incorrect summary: %s", got)
 			}
 		})
@@ -360,7 +363,7 @@ func TestStatusElapsedUsesStartForRunningAndSubmissionForWaiting(t *testing.T) {
 
 func TestStatusIdlePresentation(t *testing.T) {
 	got := formatStatus(pool.Snapshot{Host: "workstation", Capacity: 1})
-	want := "\nKiu — workstation\n────────────────────────────────────────\n\nCapacity: 1\nRunning:  0\nWaiting:  0\n\n"
+	want := "\nKiu — workstation\n────────────────────────────────────────\n\n"
 	if got != want {
 		t.Fatalf("idle view:\n got %q\nwant %q", got, want)
 	}

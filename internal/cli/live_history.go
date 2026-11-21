@@ -18,7 +18,7 @@ func formatLiveStatus(snapshot pool.Snapshot, cpu map[int]float64, results []poo
 	}
 	rows := height - 1 // The controls use one line.
 	if rows >= 10 {
-		rows -= writeQueueSummary(&frame, snapshot, false)
+		rows -= writeQueueSummary(&frame, snapshot)
 	} else {
 		fmt.Fprintf(&frame, "Kiu — %s\n", pool.DisplayText(snapshot.Host))
 		rows--

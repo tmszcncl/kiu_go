@@ -44,8 +44,7 @@ func liveStatus(stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func statusWithHistory(stdout, stderr io.Writer) int {
-	format := func(snapshot pool.Snapshot) string { return formatQueue(snapshot, nil, false) }
-	if code := writeStatus(stdout, stderr, false, format); code != 0 {
+	if code := status(stdout, stderr, false); code != 0 {
 		return code
 	}
 	directory, err := pool.StateDir()
