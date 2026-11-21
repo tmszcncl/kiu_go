@@ -169,10 +169,25 @@ func supervise(args []string, control *os.File, name string) (code int) {
 		}
 		return failure(os.Stderr, err)
 	}
+	outcome := pool.OutcomeError
+	var startedAt *time.Time
+	defer func() {
+		result := pool.Result{
+			ID: registration.Task.ID, Name: registration.Task.Name, Cwd: registration.Task.Cwd,
+			SubmittedAt: registration.Task.SubmittedAt, StartedAt: startedAt,
+			FinishedAt: time.Now().UTC(), ExitCode: code, Outcome: outcome,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := pool.RecordResult(ctx, directory, result); err != nil {
+			fmt.Fprintln(os.Stderr, "kiu: save history:", err)
+		}
+	}()
 	defer func() {
 		if err := registration.Close(); err != nil {
 			fmt.Fprintln(os.Stderr, "kiu: clean task record:", err)
 			if code == 0 {
+				outcome = pool.OutcomeError
 				code = 1
 			}
 		}
@@ -212,12 +227,14 @@ func supervise(args []string, control *os.File, name string) (code int) {
 	<-watcherDone
 	if err != nil {
 		if ctx.Err() != nil {
+			outcome = pool.OutcomeCancelled
 			return 128 + int(<-firstSignal)
 		}
 		return failure(os.Stderr, err)
 	}
 	defer lease.Close()
 	if ctx.Err() != nil {
+		outcome = pool.OutcomeCancelled
 		return 128 + int(<-firstSignal)
 	}
 	executable, err := os.Executable()
@@ -257,6 +274,7 @@ func supervise(args []string, control *os.File, name string) (code int) {
 		if err := lease.Clear(); err != nil {
 			return failure(os.Stderr, err)
 		}
+		outcome = pool.OutcomeCancelled
 		return 128 + int(s)
 	default:
 	}
@@ -275,6 +293,7 @@ func supervise(args []string, control *os.File, name string) (code int) {
 		return 1
 	}
 	_ = gateWrite.Close()
+	startedAt = registration.Task.StartedAt
 	if waited {
 		fmt.Fprintf(os.Stderr, "kiu: starting — %s (waited %s)\n", reporter.name, elapsedSince(registration.Task.SubmittedAt))
 	}
@@ -300,6 +319,7 @@ func supervise(args []string, control *os.File, name string) (code int) {
 			if cancellation == 0 {
 				reporter.report("working", "Stopping")
 				cancellation = s
+				outcome = pool.OutcomeCancelled
 				_ = syscall.Kill(-pgid, s)
 				timer = time.NewTimer(gracePeriod)
 				deadline = timer.C
@@ -318,6 +338,7 @@ func supervise(args []string, control *os.File, name string) (code int) {
 			if cancellation == 0 && errors.As(childErr, &exited) {
 				if status, ok := exited.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 					cancellation = status.Signal()
+					outcome = pool.OutcomeSignalled
 					// Crashes (SEGV/ABRT/etc.) must not be propagated as
 					// crashes to unrelated descendants. Preserve the exit
 					// status, but give descendants a normal TERM grace.
@@ -340,6 +361,7 @@ func supervise(args []string, control *os.File, name string) (code int) {
 				if cancellation != 0 {
 					return 128 + int(cancellation)
 				}
+				outcome = pool.OutcomeExited
 				return exitCode(childErr)
 			}
 			if !announcedDescendants {

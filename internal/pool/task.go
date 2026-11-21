@@ -26,6 +26,26 @@ type Task struct {
 	StartedAt        *time.Time `json:"started_at,omitempty"`
 }
 
+type Outcome string
+
+const (
+	OutcomeExited    Outcome = "exited"
+	OutcomeCancelled Outcome = "cancelled"
+	OutcomeSignalled Outcome = "signalled"
+	OutcomeError     Outcome = "error"
+)
+
+type Result struct {
+	ID          string     `json:"id"`
+	Name        string     `json:"name"`
+	Cwd         string     `json:"cwd"`
+	SubmittedAt time.Time  `json:"submitted_at"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	FinishedAt  time.Time  `json:"finished_at"`
+	ExitCode    int        `json:"exit_code"`
+	Outcome     Outcome    `json:"outcome"`
+}
+
 type Snapshot struct {
 	SchemaVersion int    `json:"schema_version"`
 	Host          string `json:"host"`

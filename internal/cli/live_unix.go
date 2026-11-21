@@ -29,15 +29,38 @@ func liveStatus(stdin io.Reader, stdout, stderr io.Writer) int {
 	input, inputOK := stdin.(*os.File)
 	output, outputOK := stdout.(*os.File)
 	if !inputOK || !outputOK || os.Getenv("TERM") == "dumb" {
-		return status(stdout, stderr, false)
+		return statusWithHistory(stdout, stderr)
 	}
 	var inputMode, outputMode syscall.Termios
 	if terminalMode(input.Fd(), getTerminalMode, &inputMode) != nil ||
 		terminalMode(output.Fd(), getTerminalMode, &outputMode) != nil {
-		return status(stdout, stderr, false)
+		return statusWithHistory(stdout, stderr)
 	}
 	if err := runLiveStatus(input, output, inputMode); err != nil {
 		fmt.Fprintln(stderr, "kiu: live status:", err)
+		return 1
+	}
+	return 0
+}
+
+func statusWithHistory(stdout, stderr io.Writer) int {
+	format := func(snapshot pool.Snapshot) string { return formatQueue(snapshot, nil, false) }
+	if code := writeStatus(stdout, stderr, false, format); code != 0 {
+		return code
+	}
+	directory, err := pool.StateDir()
+	if err != nil {
+		fmt.Fprintln(stderr, "kiu: history:", err)
+		return 1
+	}
+	results, err := pool.ReadHistory(directory)
+	if err != nil {
+		fmt.Fprintln(stderr, "kiu: history:", err)
+		return 1
+	}
+	_, err = io.WriteString(stdout, formatHistory(results, 0, len(results)+2, true))
+	if err != nil {
+		fmt.Fprintln(stderr, "kiu: write history:", err)
 		return 1
 	}
 	return 0
@@ -75,8 +98,9 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 	}
 
 	inputDone := make(chan error, 1)
+	scroll := make(chan int, 64)
 	go func() {
-		inputDone <- readLiveKeys(ctx, int(fd))
+		inputDone <- readLiveKeys(ctx, int(fd), scroll)
 		stop()
 	}()
 	defer func() {
@@ -87,6 +111,7 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var dockerCPU dockerCPUMonitor
+	var offset int
 	for ctx.Err() == nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		snapshot, readErr := pool.ReadStatus(readCtx, directory)
@@ -112,7 +137,8 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 					cancel()
 				}
 			}
-			frame = formatStatusTable(snapshot, cpuByGroup)
+			results, historyErr := pool.ReadHistory(directory)
+			frame, offset = formatLiveStatus(snapshot, cpuByGroup, results, historyErr, terminalRows(output.Fd()), offset)
 		}
 		if ctx.Err() != nil {
 			return nil
@@ -123,6 +149,8 @@ func runLiveStatus(input, output *os.File, original syscall.Termios) (err error)
 		select {
 		case <-ctx.Done():
 		case <-ticker.C:
+		case delta := <-scroll:
+			offset += delta
 		}
 	}
 	return nil
@@ -159,7 +187,8 @@ func parseCPUPercent(value string) (float64, bool) {
 	return cpu, err == nil && cpu >= 0 && !math.IsInf(cpu, 0)
 }
 
-func readLiveKeys(ctx context.Context, fd int) error {
+func readLiveKeys(ctx context.Context, fd int, scroll chan<- int) error {
+	var escape byte
 	var keys [64]byte
 	for ctx.Err() == nil {
 		count, err := syscall.Read(fd, keys[:])
@@ -177,6 +206,34 @@ func readLiveKeys(ctx context.Context, fd int) error {
 			if key == 'q' || key == 3 {
 				return nil
 			}
+			delta := 0
+			switch {
+			case key == 27:
+				escape = key
+				continue
+			case escape == 27 && (key == '[' || key == 'O'):
+				escape = key
+				continue
+			case escape == '[' || escape == 'O':
+				switch key {
+				case 'A':
+					delta = -1
+				case 'B':
+					delta = 1
+				}
+			case escape == 0 && key == 'j':
+				delta = 1
+			case escape == 0 && key == 'k':
+				delta = -1
+			}
+			escape = 0
+			if delta != 0 {
+				select {
+				case scroll <- delta:
+				case <-ctx.Done():
+					return nil
+				}
+			}
 		}
 	}
 	return nil
@@ -185,7 +242,7 @@ func readLiveKeys(ctx context.Context, fd int) error {
 func writeLiveFrame(output io.Writer, frame string) error {
 	// Explicit carriage returns also work with terminal output processing disabled.
 	frame = strings.ReplaceAll(strings.TrimRight(frame, "\n"), "\n", "\r\n")
-	_, err := io.WriteString(output, "\x1b[H\x1b[2Jq / Ctrl+C — quit\r\n"+frame)
+	_, err := io.WriteString(output, "\x1b[H\x1b[2J\x1b[?7lq / Ctrl+C — quit\r\n"+frame+"\x1b[?7h")
 	return err
 }
 
@@ -195,4 +252,13 @@ func terminalMode(fd uintptr, request uintptr, mode *syscall.Termios) error {
 		return errno
 	}
 	return nil
+}
+
+func terminalRows(fd uintptr) int {
+	var size struct{ rows, cols, x, y uint16 }
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TIOCGWINSZ, uintptr(unsafe.Pointer(&size)))
+	if errno != 0 || size.rows == 0 {
+		return 24
+	}
+	return int(size.rows)
 }

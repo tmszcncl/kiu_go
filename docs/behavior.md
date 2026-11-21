@@ -159,8 +159,21 @@ Foreign filenames in the task directory are ignored. Malformed recognized live
 records return an error rather than fabricated details. Abandoned private atomic
 write temporaries are pruned under coordination as well.
 Running metadata survives supervisor death inside the active reservation and is
-reported while the managed group still exists. No completed-job history is kept.
+reported while the managed group still exists.
 
 Same-boot PGID reuse after a supervisor crash can conservatively show the old
 job name for an unrelated group, just as it can conservatively delay admission.
 Status is not proof that a recorded PID/PGID still identifies the original process.
+
+## Recent results
+
+Bare `kiu` shows the last 100 recorded results, newest first. Each result stores
+the task ID, label, directory, submission time, optional start time, finish time,
+exit code and outcome. A cancelled waiter has no start time. Command arguments,
+environment and output are excluded. Results are stored in the user's private
+state directory alongside the live metadata. `kiu status` and `kiu status --json`
+continue to report current activity.
+
+A supervisor records results after it finishes handling the job. If it is killed
+before it can write a result, the job can be absent from history. A failed
+history write is reported on stderr and preserves the command's exit status.

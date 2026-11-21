@@ -201,6 +201,11 @@ func TestWaitingCancellationDoesNotLaunch(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitExit(t, second, 128+int(s))
+			results, err := pool.ReadHistory(testStateDir(home))
+			if err != nil || len(results) != 1 || results[0].Outcome != pool.OutcomeCancelled ||
+				results[0].StartedAt != nil || results[0].ExitCode != 128+int(s) {
+				t.Fatalf("waiting cancellation history = %+v, err = %v", results, err)
+			}
 			releaseJob(t, first)
 			waitExit(t, first, 0)
 			if _, err := os.Stat(second.ready); !os.IsNotExist(err) {
@@ -255,8 +260,15 @@ func TestNormalExitCodes(t *testing.T) {
 		if code == 42 {
 			mode = "exit42"
 		}
-		i := startInvocation(t, t.TempDir(), mode)
+		home := t.TempDir()
+		i := startInvocation(t, home, mode, "Test result")
 		waitExit(t, i, code)
+		results, err := pool.ReadHistory(testStateDir(home))
+		if err != nil || len(results) != 1 || results[0].Name != "Test result" ||
+			results[0].ExitCode != code || results[0].Outcome != pool.OutcomeExited ||
+			results[0].StartedAt == nil || results[0].FinishedAt.Before(*results[0].StartedAt) {
+			t.Fatalf("history = %+v, err = %v", results, err)
+		}
 	}
 }
 
@@ -316,12 +328,17 @@ func TestDirectChildCrashGivesDescendantsGrace(t *testing.T) {
 	waitExit(t, second, 0)
 }
 
-func snapshot(t *testing.T, home string) pool.Snapshot {
-	t.Helper()
+func testStateDir(home string) string {
 	directory := filepath.Join(home, "kiu")
 	if runtime.GOOS == "darwin" {
 		directory = filepath.Join(home, "Library", "Application Support", "kiu", "state")
 	}
+	return directory
+}
+
+func snapshot(t *testing.T, home string) pool.Snapshot {
+	t.Helper()
+	directory := testStateDir(home)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	result, err := pool.ReadStatus(ctx, directory)

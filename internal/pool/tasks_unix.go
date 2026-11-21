@@ -82,16 +82,20 @@ func atomicJSON(directory, path string, value any) error {
 }
 
 func readJSON(path string, target any) error {
+	return readLimitedJSON(path, target, 32768)
+}
+
+func readLimitedJSON(path string, target any, limit int) error {
 	file, err := openPrivateFile(path, syscall.O_RDONLY)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 32769))
+	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
 	if err != nil {
 		return err
 	}
-	if len(data) > 32768 {
+	if len(data) > limit {
 		return fmt.Errorf("%s exceeds metadata size limit", path)
 	}
 	if err := json.Unmarshal(data, target); err != nil {

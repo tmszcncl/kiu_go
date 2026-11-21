@@ -119,9 +119,11 @@ kiu: starting — Calculyo — system tests (waited 1m8s)
 ```
 
 The initial wait message is a snapshot. Run `kiu` with no arguments in a terminal
-to open a full-screen queue view that refreshes once a second. Press `q` or
-`Ctrl+C` to close the view and return to the previous screen. The view leaves
-the job slot available and jobs keep running when you close it.
+to open a full-screen queue view that refreshes once a second. Recent results
+appear below the queue, newest first. The number visible depends on the terminal
+height and the space used by the queue. Use the arrow keys or `j` / `k` to
+scroll through the last 100 results. Press `q` or `Ctrl+C` to close the view.
+Jobs keep running when you close it.
 The live table shows CPU for the running job by summing the OS-reported usage
 of its process group. One fully used logical CPU is 100%. Waiting jobs have a
 blank CPU cell. macOS reports recent usage and Linux reports a lifetime average
@@ -132,7 +134,8 @@ exactly one running container matches, the cell shows that container's total CPU
 Unsupported Docker invocations and ambiguous matches leave the cell blank.
 
 For a single snapshot, use either command below. With redirected input or output,
-bare `kiu` also prints a single text snapshot. For usage help, run `kiu help`.
+bare `kiu` prints a text snapshot followed by recent results. For usage help,
+run `kiu help`.
 
 ```sh
 kiu status

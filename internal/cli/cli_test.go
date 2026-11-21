@@ -23,9 +23,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestBareKiuOutsideTerminalPrintsStatus(t *testing.T) {
+func TestBareKiuOutsideTerminalPrintsStatusAndHistory(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("KIU_EXECUTION_CONTEXT", "")
+	t.Setenv("KIU_HERDR_STATUS", "")
+	if code := Run([]string{"--name", "Recorded command", "/bin/sh", "-c", "exit 42"}, nil, io.Discard, io.Discard, "test"); code != 42 {
+		t.Fatalf("command exit = %d, want 42", code)
+	}
 	var bare, explicit, stderr bytes.Buffer
 	for _, invocation := range []struct {
 		args []string
@@ -35,7 +40,10 @@ func TestBareKiuOutsideTerminalPrintsStatus(t *testing.T) {
 			t.Fatalf("exit %d: %s", code, &stderr)
 		}
 	}
-	if bare.String() != explicit.String() || strings.Contains(bare.String(), "\x1b") {
+	if !strings.HasPrefix(bare.String(), strings.Replace(explicit.String(), "Waiting:  0\n", "", 1)) ||
+		strings.Contains(bare.String(), "Waiting:") ||
+		!strings.Contains(bare.String(), "failed (exit 42)") || !strings.Contains(bare.String(), "Recorded command") ||
+		strings.Contains(explicit.String(), "History") || strings.Contains(bare.String(), "\x1b") {
 		t.Fatalf("bare kiu: %q, status: %q", &bare, &explicit)
 	}
 }
